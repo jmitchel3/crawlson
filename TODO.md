@@ -35,9 +35,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] Record what is genuinely reusable versus Reference Project-specific.
 - [ ] Preserve a few sanitized examples as design fixtures; do not copy secrets,
       production identifiers, or customer data.
-- [ ] Write a short architecture decision describing the chosen MVP language and
-      runtime. Evaluate the existing TypeScript/Playwright implementation, but
-      do not choose it by inertia.
+- [x] Write a short architecture decision describing the chosen MVP language and
+      runtime. Rust was selected with a process-level `agent-browser` boundary;
+      see [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md).
 
 ## Phase 1: define the contracts
 
@@ -96,6 +96,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Include only steps that were actually completed and verified.
 - [ ] Represent blocked, text-only, incomplete, and retired guides explicitly.
 - [ ] Make image naming and replacement deterministic.
+- [ ] Render each guide action screenshot with a reproducible red target outline
+      and translucent near-black surrounding mask while preserving the raw
+      screenshot as authoritative evidence.
 - [ ] Detect orphaned images, dead Markdown links, missing index entries, and
       stale generated output.
 - [ ] Allow application-specific rendering without coupling it to the runner.
@@ -126,9 +129,11 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 
 ## Decisions to make deliberately
 
-- [ ] Python, TypeScript, or a split architecture
-- [ ] The smallest useful `agent-browser` adapter contract and whether a broader
-      driver protocol is warranted later
+- [x] Rust for the MVP core and CLI, with documented Python-then-TypeScript
+      fallback triggers in
+      [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
+- [x] A process-level, typed-capability `agent-browser` adapter for the MVP;
+      consider a broader driver protocol only when a second driver requires it
 - [ ] Declarative data format versus code-first journey API
 - [ ] How agents propose actions without bypassing deterministic safety checks
 - [ ] Local model, hosted model, and model-provider abstraction boundaries
