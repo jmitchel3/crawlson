@@ -15,6 +15,7 @@ use wait_timeout::ChildExt;
 
 use crate::focus::{CssBox, Viewport};
 use crate::journey::{Origin, hex_digest};
+use crate::net_guard::ExactOriginGuard;
 
 const MAX_STDOUT_BYTES: usize = 1_048_576;
 const MAX_STDERR_BYTES: usize = 65_536;
@@ -26,6 +27,8 @@ const READ_ONLY_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"
 const FOLLOW_LINK_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\"]}\n";
 const AUTHENTICATED_READ_ONLY_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"state_load\"]}\n";
 const AUTHENTICATED_FOLLOW_LINK_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\",\"state_load\"]}\n";
+const MUTATION_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"count\",\"inputvalue\",\"fill\",\"click\"]}\n";
+const AUTHENTICATED_MUTATION_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"count\",\"inputvalue\",\"fill\",\"click\",\"state_load\"]}\n";
 pub const VIEWPORT_WIDTH_CSS: f64 = 1280.0;
 pub const VIEWPORT_HEIGHT_CSS: f64 = 720.0;
 
@@ -35,6 +38,8 @@ pub enum DriverPolicyMode {
     FollowLink,
     AuthenticatedReadOnly,
     AuthenticatedFollowLink,
+    Mutation,
+    AuthenticatedMutation,
 }
 
 impl DriverPolicyMode {
@@ -44,6 +49,8 @@ impl DriverPolicyMode {
             Self::FollowLink => FOLLOW_LINK_POLICY,
             Self::AuthenticatedReadOnly => AUTHENTICATED_READ_ONLY_POLICY,
             Self::AuthenticatedFollowLink => AUTHENTICATED_FOLLOW_LINK_POLICY,
+            Self::Mutation => MUTATION_POLICY,
+            Self::AuthenticatedMutation => AUTHENTICATED_MUTATION_POLICY,
         }
     }
 }
@@ -114,6 +121,13 @@ pub trait BrowserDriver {
         })
     }
     fn start_trace(&mut self) -> Result<(), DriverError>;
+    fn verify_exact_origin_guard(&mut self) -> Result<u32, DriverError> {
+        Err(DriverError::Protocol {
+            capability: "exact_origin_guard".to_owned(),
+            message: "driver does not implement exact-origin guard attestation".to_owned(),
+        })
+    }
+    fn begin_fixture_cleanup(&mut self) {}
     fn navigate(&mut self, url: &Url) -> Result<(), DriverError>;
     fn current_url(&mut self) -> Result<Url, DriverError>;
     fn text(&mut self, selector: &str) -> Result<String, DriverError>;
@@ -128,6 +142,24 @@ pub trait BrowserDriver {
         Err(DriverError::Protocol {
             capability: "get_attribute".to_owned(),
             message: "driver does not implement attribute inspection".to_owned(),
+        })
+    }
+    fn count(&mut self, _selector: &str) -> Result<u64, DriverError> {
+        Err(DriverError::Protocol {
+            capability: "get_count".to_owned(),
+            message: "driver does not implement element counting".to_owned(),
+        })
+    }
+    fn value(&mut self, _selector: &str) -> Result<String, DriverError> {
+        Err(DriverError::Protocol {
+            capability: "get_value".to_owned(),
+            message: "driver does not implement value inspection".to_owned(),
+        })
+    }
+    fn fill(&mut self, _selector: &str, _value: &str) -> Result<(), DriverError> {
+        Err(DriverError::Protocol {
+            capability: "fill".to_owned(),
+            message: "driver does not implement fill".to_owned(),
         })
     }
     fn click(&mut self, _selector: &str) -> Result<(), DriverError> {
@@ -151,6 +183,8 @@ pub struct AgentBrowserDriver {
     config_path: PathBuf,
     policy_path: PathBuf,
     policy: &'static [u8],
+    exact_origin_guard: Option<ExactOriginGuard>,
+    browser_executable: Option<PathBuf>,
     timeout: Duration,
     run_deadline: Instant,
     trace_started: bool,
@@ -188,6 +222,29 @@ impl AgentBrowserDriver {
         run_timeout: Duration,
         policy_mode: DriverPolicyMode,
     ) -> Result<Self, DriverError> {
+        Self::new_with_policy_mode_and_browser(
+            executable,
+            run_root,
+            origin,
+            session,
+            timeout,
+            run_timeout,
+            policy_mode,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_mode_and_browser(
+        executable: &Path,
+        run_root: &Path,
+        origin: Origin,
+        session: String,
+        timeout: Duration,
+        run_timeout: Duration,
+        policy_mode: DriverPolicyMode,
+        browser_executable: Option<&Path>,
+    ) -> Result<Self, DriverError> {
         if timeout.is_zero() || timeout >= Duration::from_secs(30) {
             return Err(DriverError::Io(
                 "action timeout must be greater than zero and below 30 seconds".to_owned(),
@@ -217,11 +274,29 @@ impl AgentBrowserDriver {
             DriverPolicyMode::FollowLink => "follow-link-policy.json",
             DriverPolicyMode::AuthenticatedReadOnly => "authenticated-read-only-policy.json",
             DriverPolicyMode::AuthenticatedFollowLink => "authenticated-follow-link-policy.json",
+            DriverPolicyMode::Mutation => "mutation-policy.json",
+            DriverPolicyMode::AuthenticatedMutation => "authenticated-mutation-policy.json",
         });
         let policy = policy_mode.policy();
         fs::write(&config_path, OWNED_CONFIG)
             .map_err(|error| DriverError::Io(error.to_string()))?;
         fs::write(&policy_path, policy).map_err(|error| DriverError::Io(error.to_string()))?;
+        let exact_origin_guard = matches!(
+            policy_mode,
+            DriverPolicyMode::Mutation | DriverPolicyMode::AuthenticatedMutation
+        )
+        .then(|| ExactOriginGuard::materialize(&run_root, &origin))
+        .transpose()
+        .map_err(|error| DriverError::Io(error.to_string()))?;
+        let browser_executable = browser_executable
+            .map(validate_extension_browser)
+            .transpose()?;
+        if exact_origin_guard.is_some() && browser_executable.is_none() {
+            return Err(DriverError::Unavailable(
+                "mutating journeys require an explicit extension-capable Chromium or Chrome for Testing executable"
+                    .to_owned(),
+            ));
+        }
 
         Ok(Self {
             executable,
@@ -231,6 +306,8 @@ impl AgentBrowserDriver {
             config_path,
             policy_path,
             policy,
+            exact_origin_guard,
+            browser_executable,
             timeout,
             run_deadline: Instant::now() + run_timeout,
             trace_started: false,
@@ -263,7 +340,14 @@ impl AgentBrowserDriver {
             .args(["--max-output", "65536"])
             .args(["--headed", "false"])
             .arg("--no-auto-dialog")
-            .args(["--screenshot-format", "png"])
+            .args(["--screenshot-format", "png"]);
+        if let Some(guard) = &self.exact_origin_guard {
+            command.arg("--extension").arg(guard.extension_path());
+        }
+        if let Some(executable) = &self.browser_executable {
+            command.arg("--executable-path").arg(executable);
+        }
+        command
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -463,6 +547,12 @@ impl BrowserDriver for AgentBrowserDriver {
                 message: "owned configuration or action policy changed before launch".to_owned(),
             });
         }
+        if let Some(guard) = &self.exact_origin_guard {
+            guard.verify().map_err(|error| DriverError::Protocol {
+                capability: "exact_origin_guard".to_owned(),
+                message: error.to_string(),
+            })?;
+        }
         let data = self.execute("set_viewport", &["set", "viewport", "1280", "720"])?;
         if data.get("width").and_then(Value::as_u64) != Some(1280)
             || data.get("height").and_then(Value::as_u64) != Some(720)
@@ -511,6 +601,37 @@ impl BrowserDriver for AgentBrowserDriver {
         }
         self.trace_started = true;
         Ok(())
+    }
+
+    fn verify_exact_origin_guard(&mut self) -> Result<u32, DriverError> {
+        let selector = self
+            .exact_origin_guard
+            .as_ref()
+            .ok_or_else(|| DriverError::Protocol {
+                capability: "exact_origin_guard".to_owned(),
+                message: "mutating driver omitted its exact-origin guard".to_owned(),
+            })?
+            .marker_selector()
+            .to_owned();
+        let data = self.execute("exact_origin_guard", &["get", "count", &selector])?;
+        if data.get("count").and_then(Value::as_u64) != Some(1) {
+            return Err(DriverError::Protocol {
+                capability: "exact_origin_guard".to_owned(),
+                message: "browser did not attest the owned exact-origin network guard".to_owned(),
+            });
+        }
+        self.records
+            .last()
+            .filter(|record| record.capability == "exact_origin_guard")
+            .map(|record| record.sequence)
+            .ok_or_else(|| DriverError::Protocol {
+                capability: "exact_origin_guard".to_owned(),
+                message: "guard attestation omitted command provenance".to_owned(),
+            })
+    }
+
+    fn begin_fixture_cleanup(&mut self) {
+        self.run_deadline = Instant::now() + Duration::from_secs(60);
     }
 
     fn navigate(&mut self, url: &Url) -> Result<(), DriverError> {
@@ -594,6 +715,38 @@ impl BrowserDriver for AgentBrowserDriver {
                 message: "response omitted string-or-null attribute value".to_owned(),
             }),
         }
+    }
+
+    fn count(&mut self, selector: &str) -> Result<u64, DriverError> {
+        let data = self.execute("get_count", &["get", "count", selector])?;
+        data.get("count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| DriverError::Protocol {
+                capability: "get_count".to_owned(),
+                message: "response omitted element count".to_owned(),
+            })
+    }
+
+    fn value(&mut self, selector: &str) -> Result<String, DriverError> {
+        let data = self.execute("get_value", &["get", "value", selector])?;
+        data.get("value")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| DriverError::Protocol {
+                capability: "get_value".to_owned(),
+                message: "response omitted string value".to_owned(),
+            })
+    }
+
+    fn fill(&mut self, selector: &str, value: &str) -> Result<(), DriverError> {
+        let data = self.execute("fill", &["fill", selector, value])?;
+        if data.get("filled").and_then(Value::as_str) != Some(selector) {
+            return Err(DriverError::Protocol {
+                capability: "fill".to_owned(),
+                message: "response did not acknowledge the exact selector".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn click(&mut self, selector: &str) -> Result<(), DriverError> {
@@ -872,6 +1025,57 @@ fn valid_session(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
+}
+
+fn validate_extension_browser(path: &Path) -> Result<PathBuf, DriverError> {
+    let supplied =
+        fs::symlink_metadata(path).map_err(|error| DriverError::Unavailable(error.to_string()))?;
+    if supplied.file_type().is_symlink() || !supplied.is_file() {
+        return Err(DriverError::Unavailable(
+            "browser executable must be a regular non-symlink file".to_owned(),
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| DriverError::Unavailable(error.to_string()))?;
+    let mut child = Command::new(&canonical)
+        .env_clear()
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| DriverError::Unavailable(error.to_string()))?;
+    let status = child
+        .wait_timeout(Duration::from_secs(5))
+        .map_err(|error| DriverError::Unavailable(error.to_string()))?;
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(DriverError::Unavailable(
+            "browser version probe timed out".to_owned(),
+        ));
+    };
+    let mut output = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        stdout
+            .take(4096)
+            .read_to_end(&mut output)
+            .map_err(|error| DriverError::Unavailable(error.to_string()))?;
+    }
+    if !status.success() {
+        return Err(DriverError::Unavailable(
+            "browser version probe failed".to_owned(),
+        ));
+    }
+    let version = String::from_utf8_lossy(&output);
+    if !version.contains("Chrome for Testing") && !version.contains("Chromium") {
+        return Err(DriverError::Unavailable(
+            "mutating journeys require Chromium or Chrome for Testing because branded Chrome may ignore unpacked extensions"
+                .to_owned(),
+        ));
+    }
+    Ok(canonical)
 }
 
 fn navigation_was_blocked(message: &str) -> bool {

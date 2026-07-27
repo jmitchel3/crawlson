@@ -1,11 +1,13 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use png::{ColorType, Decoder, Transformations};
@@ -16,12 +18,18 @@ use wait_timeout::ChildExt;
 const REAL_BROWSER_MODE: &str = "CRAWLSON_REAL_BROWSER";
 const REAL_CLI_BIN: &str = "CRAWLSON_REAL_CLI_BIN";
 const REAL_DEMO_BIN: &str = "CRAWLSON_REAL_DEMO_BIN";
+const REAL_BROWSER_BIN: &str = "CRAWLSON_REAL_BROWSER_BIN";
 const REQUIRED_MODE: &str = "required";
 const SKIP_MODE: &str = "skip";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(180);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCUMENTED_DEMO_ORIGIN: &str = "http://127.0.0.1:4173";
+const MUTATION_GRANTS: [&str; 3] = [
+    "demo.mutating-pass@1:fill-fixture-name",
+    "demo.mutating-pass@1:create-fixture",
+    "demo.mutating-pass@1:ensure-fixture-absent",
+];
 
 #[test]
 #[ignore = "set CRAWLSON_REAL_BROWSER=required and run with --ignored; use =skip only for an explicit portable opt-out"]
@@ -307,6 +315,78 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
             .is_some_and(Vec::is_empty)
     );
 
+    let browser = extension_browser_executable();
+    let trap = NetworkTrap::start();
+    trap.assert_detects_control_request();
+    let mutation_journey = copy_network_guard_journey(directory.path(), &demo.origin);
+    let (mutation_auth_state, mutation_auth_value) =
+        write_mutation_auth_state(directory.path(), &demo.origin, &trap.origin);
+    let mutation = run_mutating_journey(
+        &mutation_journey,
+        &directory.path().join("mutation-runs"),
+        agent_browser.as_os_str(),
+        browser.as_os_str(),
+        &demo.origin,
+        &mutation_auth_state,
+        &directory.path().join("mutation-crawlson-home"),
+    );
+    assert_exit(&mutation, 0, "exact-origin guarded mutation journey");
+    let mutation_report = json_stdout(&mutation, "exact-origin guarded mutation journey");
+    assert_eq!(mutation_report["schema_version"], 4);
+    assert_eq!(mutation_report["outcome"], "passed");
+    assert_eq!(mutation_report["execution_outcome"], "passed");
+    assert_eq!(mutation_report["fixture"]["mutation_attempted"], true);
+    assert_eq!(mutation_report["fixture"]["cleanup_status"], "passed");
+    assert_eq!(mutation_report["fixture"]["recovery_required"], false);
+    let probe_step = mutation_report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "verify-network-guard-probes")
+        .expect("network probes must execute through the visible target page");
+    assert_eq!(probe_step["status"], "passed");
+    assert_eq!(probe_step["observation"]["matched"], true);
+    assert_eq!(
+        mutation_report["driver"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["capability"] == "exact_origin_guard")
+            .count(),
+        MUTATION_GRANTS.len()
+    );
+    let mutation_root = run_root(&mutation_report);
+    let mutation_render = render_journey(&mutation_root, &mutation_journey);
+    assert_exit(&mutation_render, 0, "exact-origin guarded mutation render");
+    assert_eq!(
+        json_stdout(&mutation_render, "exact-origin guarded mutation render")["status"],
+        "guide_ready"
+    );
+
+    thread::sleep(Duration::from_millis(250));
+    trap.assert_no_requests();
+    fs::remove_file(&mutation_auth_state).expect("remove mutation authentication state");
+    let mutation_auth_path = mutation_auth_state.to_string_lossy();
+    for sentinel in [
+        mutation_auth_path.as_bytes(),
+        mutation_auth_value.as_bytes(),
+    ] {
+        assert!(
+            !mutation
+                .stdout
+                .windows(sentinel.len())
+                .any(|value| value == sentinel)
+        );
+        assert!(
+            !mutation
+                .stderr
+                .windows(sentinel.len())
+                .any(|value| value == sentinel)
+        );
+        assert_tree_excludes(&mutation_root, sentinel);
+    }
+    trap.shutdown();
+
     demo.shutdown();
 }
 
@@ -350,6 +430,93 @@ fn agent_browser_executable() -> PathBuf {
     candidate
         .canonicalize()
         .unwrap_or_else(|error| panic!("resolve {}: {error}", candidate.display()))
+}
+
+fn extension_browser_executable() -> PathBuf {
+    if let Some(value) = std::env::var_os(REAL_BROWSER_BIN) {
+        let requested = PathBuf::from(value);
+        assert!(
+            requested.is_absolute(),
+            "{REAL_BROWSER_BIN} must name an absolute executable path"
+        );
+        return supported_extension_browser(&requested).unwrap_or_else(|| {
+            panic!(
+                "{REAL_BROWSER_BIN} must identify a regular Chromium or Chrome for Testing executable"
+            )
+        });
+    }
+
+    let mut roots = Vec::new();
+    if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        roots.push(PathBuf::from(path));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        roots.push(home.join(".cache/ms-playwright"));
+        roots.push(home.join("Library/Caches/ms-playwright"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("ms-playwright"));
+    }
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        collect_browser_candidates(&root, 8, &mut candidates);
+    }
+    candidates.sort();
+    candidates.reverse();
+    candidates
+        .iter()
+        .find_map(|candidate| supported_extension_browser(candidate))
+        .unwrap_or_else(|| {
+            panic!(
+                "no extension-capable Playwright browser was found; set {REAL_BROWSER_BIN} to an absolute Chromium or Chrome for Testing executable"
+            )
+        })
+}
+
+fn collect_browser_candidates(directory: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_browser_candidates(&path, depth - 1, candidates);
+            continue;
+        }
+        let name = path.file_name().and_then(OsStr::to_str);
+        if metadata.is_file()
+            && matches!(
+                name,
+                Some("chrome" | "chrome.exe" | "chromium" | "Google Chrome for Testing")
+            )
+        {
+            candidates.push(path);
+        }
+    }
+}
+
+fn supported_extension_browser(path: &Path) -> Option<PathBuf> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let output = Command::new(&canonical).arg("--version").output().ok()?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    (output.status.success()
+        && (version.contains("Chrome for Testing") || version.contains("Chromium")))
+    .then_some(canonical)
 }
 
 fn require_supported_agent_browser(executable: &OsStr) {
@@ -487,6 +654,125 @@ impl Drop for DemoProcess {
     }
 }
 
+struct NetworkTrap {
+    origin: String,
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    requests: Arc<Mutex<Vec<String>>>,
+    worker: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+impl NetworkTrap {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cross-port network trap");
+        listener
+            .set_nonblocking(true)
+            .expect("make cross-port network trap nonblocking");
+        let address = listener.local_addr().expect("read network trap address");
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let worker_stop = Arc::clone(&stop);
+        let worker_requests = Arc::clone(&requests);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(format!("network trap accept failed: {error}")),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .map_err(|error| format!("network trap timeout failed: {error}"))?;
+                let mut request = [0u8; 4096];
+                let count = stream
+                    .read(&mut request)
+                    .map_err(|error| format!("network trap read failed: {error}"))?;
+                let first_line = String::from_utf8_lossy(&request[..count])
+                    .lines()
+                    .next()
+                    .unwrap_or("empty request")
+                    .to_owned();
+                worker_requests
+                    .lock()
+                    .map_err(|_| "network trap request lock was poisoned".to_owned())?
+                    .push(first_line);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                    )
+                    .map_err(|error| format!("network trap response failed: {error}"))?;
+            }
+            Ok(())
+        });
+        Self {
+            origin: format!("http://{address}/"),
+            address,
+            stop,
+            requests,
+            worker: Some(worker),
+        }
+    }
+
+    fn assert_detects_control_request(&self) {
+        let mut stream = TcpStream::connect(self.address).expect("connect to network trap control");
+        stream
+            .write_all(b"GET /control HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .expect("write network trap control request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("read network trap control response");
+        assert!(response.starts_with(b"HTTP/1.1 204 No Content\r\n"));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let mut requests = self.requests.lock().expect("read network trap requests");
+            if !requests.is_empty() {
+                assert_eq!(requests.as_slice(), ["GET /control HTTP/1.1"]);
+                requests.clear();
+                break;
+            }
+            drop(requests);
+            assert!(
+                Instant::now() < deadline,
+                "network trap missed its control request"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn assert_no_requests(&self) {
+        let requests = self.requests.lock().expect("read network trap requests");
+        assert!(
+            requests.is_empty(),
+            "the exact-origin guard allowed cross-port browser traffic: {requests:?}"
+        );
+    }
+
+    fn shutdown(mut self) {
+        self.stop.store(true, Ordering::Release);
+        let result = self
+            .worker
+            .take()
+            .expect("network trap worker is present")
+            .join()
+            .expect("join network trap worker");
+        result.expect("network trap worker completed cleanly");
+    }
+}
+
+impl Drop for NetworkTrap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn startup_failure(child: &mut Child, message: &str) -> ! {
     panic!("{message}: {}", stop_failed_demo(child));
 }
@@ -556,6 +842,42 @@ fn copy_demo_journey(directory: &Path, name: &str, origin: &str) -> PathBuf {
     journey
 }
 
+fn copy_network_guard_journey(directory: &Path, origin: &str) -> PathBuf {
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("mutating-pass.toml");
+    let source = fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
+    assert_eq!(source.matches(DOCUMENTED_DEMO_ORIGIN).count(), 1);
+    let mutation_path = "action = { type = \"navigate\", path = \"/mutation\" }";
+    assert_eq!(source.matches(mutation_path).count(), 1);
+    let phase_marker = "\n[[steps]]\nid = \"fill-fixture-name\"";
+    assert_eq!(source.matches(phase_marker).count(), 1);
+    let probe = r##"
+[[setup_steps]]
+id = "verify-network-guard-probes"
+title = "Verify all cross-port probes were dispatched"
+effect = "read_only"
+action = { type = "check_text", selector = "#network-guard-probes", expected = "fetch, sendBeacon, and WebSocket probes dispatched.", comparison = "exact" }
+
+[[steps]]
+id = "fill-fixture-name""##;
+    let journey = directory.join("mutating-network-guard.toml");
+    fs::write(
+        &journey,
+        source
+            .replace(DOCUMENTED_DEMO_ORIGIN, origin)
+            .replacen(
+                mutation_path,
+                "action = { type = \"navigate\", path = \"/mutation/network-guard\" }",
+                1,
+            )
+            .replacen(phase_marker, probe, 1),
+    )
+    .expect("write network-guard mutation journey");
+    journey
+}
+
 fn run_journey(
     journey: &Path,
     output_directory: &Path,
@@ -603,6 +925,36 @@ fn run_authenticated_journey(
     command_output(command, "authenticated crawlson run")
 }
 
+fn run_mutating_journey(
+    journey: &Path,
+    output_directory: &Path,
+    agent_browser: &OsStr,
+    browser: &OsStr,
+    allowed_origin: &str,
+    auth_state: &Path,
+    crawlson_home: &Path,
+) -> Output {
+    let mut command = Command::new(crawlson_executable());
+    command
+        .args(["--json", "run"])
+        .arg(journey)
+        .arg("--output-dir")
+        .arg(output_directory)
+        .arg("--agent-browser")
+        .arg(agent_browser)
+        .arg("--browser-executable")
+        .arg(browser)
+        .arg("--allow-origin")
+        .arg(allowed_origin)
+        .arg("--auth-state")
+        .arg(auth_state)
+        .env("CRAWLSON_HOME", crawlson_home);
+    for grant in MUTATION_GRANTS {
+        command.arg("--allow-mutation").arg(grant);
+    }
+    command_output(command, "mutating crawlson run")
+}
+
 fn write_auth_state(directory: &Path, origin: &str) -> (PathBuf, String) {
     let value = format!("crawlson-demo-fixture-real-{}", std::process::id());
     let path = directory.join("private-auth-state-source.json");
@@ -620,6 +972,34 @@ fn write_auth_state(directory: &Path, origin: &str) -> (PathBuf, String) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("restrict disposable authentication state");
+    }
+    (path, value)
+}
+
+fn write_mutation_auth_state(
+    directory: &Path,
+    origin: &str,
+    trap_origin: &str,
+) -> (PathBuf, String) {
+    let value = format!("crawlson-demo-fixture-network-real-{}", std::process::id());
+    let path = directory.join("private-mutation-auth-state-source.json");
+    let document = serde_json::json!({
+        "cookies": [],
+        "origins": [{
+            "origin": origin,
+            "localStorage": [
+                {"name": "crawlson_demo_session", "value": value},
+                {"name": "crawlson_demo_network_trap_origin", "value": trap_origin}
+            ]
+        }]
+    });
+    fs::write(&path, serde_json::to_vec(&document).unwrap())
+        .expect("write disposable mutation authentication state");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("restrict disposable mutation authentication state");
     }
     (path, value)
 }

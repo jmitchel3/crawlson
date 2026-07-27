@@ -69,7 +69,8 @@ execution path, integrated through its supported process and JSON interface so
 the boundary remains replaceable. The first versioned journey and report
 contracts are deliberately narrow: v1 and v2 are read-only, while v3 adds one
 explicitly authorized, deterministic same-origin link action and v4 adds one
-secret-safe `agent-browser` state-file authentication provider. See
+secret-safe `agent-browser` state-file authentication provider. V5 adds one
+fail-closed disposable mutation workflow with visible setup and cleanup. See
 [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
 for the runtime comparison, adapter lifecycle, safety ownership, and exact
 fallback criteria.
@@ -79,21 +80,22 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.8.0 CLI provides an independently useful authenticated
-action-and-guide vertical slice. It can run an explicitly authorized journey
+The Rust 0.9.0 CLI provides an independently useful authenticated mutation,
+finding, and guide vertical slice. It can run an explicitly authorized journey
 through `agent-browser`, import bounded exact-origin browser storage without
-retaining its source or values, verify the declared role through visible UI,
-retain raw evidence, follow and verify a declared same-origin link, render
-focused action images, and turn a completed run into either a verified guide or
-evidence-backed deterministic findings. Multiple verified runs can be compiled
+retaining its source or values, verify a disposable actor through visible UI,
+retain raw evidence, execute one-shot link and form actions, verify their
+declared effects, attempt visible cleanup, and preserve a durable recovery
+barrier when cleanup is not verified. Inputs and buttons receive focused
+red-box/dimmed evidence before dispatch. Completed runs become either verified
+guides or evidence-backed deterministic findings. Multiple runs can be compiled
 into a deterministic, navigable Markdown guide collection with a separate
 findings review tree and read-only integrity audit. The repository includes a
 self-contained disposable-session demo of that complete loop and a
 non-publishing release path for validating bundles and managed installation. No
-public 0.8.0 release exists yet: license selection, namespace reservation, and
+public 0.9.0 release exists yet: license selection, namespace reservation, and
 production signing-key custody remain owner decisions. Autonomous agent
-exploration, mutations, and model-judged observations remain later vertical
-slices.
+exploration and model-judged observations remain later vertical slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
@@ -111,6 +113,13 @@ cargo build --locked --bins
 ./target/debug/crawlson --json run examples/authenticated-pass.toml \
   --allow-origin http://127.0.0.1:4173 \
   --auth-state /absolute/private/state.json
+./target/debug/crawlson --json run examples/mutating-pass.toml \
+  --allow-origin http://127.0.0.1:4173 \
+  --allow-mutation demo.mutating-pass@1:fill-fixture-name \
+  --allow-mutation demo.mutating-pass@1:create-fixture \
+  --allow-mutation demo.mutating-pass@1:ensure-fixture-absent \
+  --auth-state /absolute/private/disposable-state.json \
+  --browser-executable /absolute/path/to/chromium
 ./target/debug/crawlson render crawlson-runs/RUN_ID \
   --journey examples/follow-link-pass.toml
 ./target/debug/crawlson --json guides build ./crawlson-guides.toml \
@@ -125,7 +134,7 @@ so `clson doctor`, `clson guides`, and `clson upgrade` have the same behavior.
 
 ### Release bundles and managed installation
 
-Crawlson 0.8.0 defines deterministic bundles for four targets: Apple Silicon
+Crawlson 0.9.0 defines deterministic bundles for four targets: Apple Silicon
 macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
 the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
 script and journey fixtures. The demo stays in the extracted bundle; managed
@@ -170,13 +179,17 @@ failures exit 1 and argument errors exit 2.
 ### Complete local demo
 
 The fastest way to see the product loop is the self-contained loopback demo. It
-requires Rust 1.92 and `agent-browser 0.26.x` with its browser runtime. One
-supported installation path is:
+requires Rust 1.92, `agent-browser 0.26.x`, and an extension-capable Chromium or
+Chrome for Testing runtime. One supported installation path is:
 
 ```console
 npm install --global --ignore-scripts agent-browser@0.26.0
 agent-browser install
 ```
+
+The script searches the driver and Playwright browser caches. If discovery is
+ambiguous, pass the regular executable explicitly with
+`--browser-executable /absolute/path/to/chromium`.
 
 From the repository root, choose a new or empty artifact directory and run:
 
@@ -195,7 +208,7 @@ scripts/demo.sh \
   --output-dir ./crawlson-demo-output
 ```
 
-Both forms start the loopback application and run eight cases through the real
+Both forms start the loopback application and run these cases through the real
 browser adapter, then compile and check the resulting guide collections:
 
 - a passing journey that renders a Markdown guide;
@@ -206,15 +219,19 @@ browser adapter, then compile and check the resulting guide collections:
 - an action whose exact postcondition fails and is rendered as a finding;
 - a missing-action-authorization attempt that is blocked before browser launch;
 - an authenticated viewer journey whose disposable state is verified through
-  visible UI and rendered as a guide; and
-- a missing-state attempt that is blocked before browser launch.
+  visible UI and rendered as a guide;
+- a missing-state attempt that is blocked before browser launch;
+- a disposable mutation that fills and submits a visible form once, renders a
+  guide, and visibly verifies cleanup; and
+- missing mutation authorization and missing disposable state attempts that are
+  blocked before mutation dispatch.
 
-The three successful journeys become one root/topic/guide Markdown tree with
+The four successful journeys become one root/topic/guide Markdown tree with
 byte-identical red-box/dimmed focused images. The two deterministic failures
 become a separate linked review tree; that tree deliberately has no public root
 guide index. Both trees are checked again without rewriting them.
 
-The command exits successfully only when all eight produce their expected
+The command exits successfully only when every case produces its expected
 outcomes. It prints the guide, findings, collection, and review paths and
 preserves the JSON reports, raw viewport screenshots, red-box/dimmed focused
 screenshots, focus metadata, browser traces, command logs, collection manifests,
@@ -231,10 +248,13 @@ CRAWLSON_REAL_BROWSER=required \
 ```
 
 Set `AGENT_BROWSER_REAL_BIN` to an absolute executable path when
-`agent-browser` is not on `PATH`. The required CI job runs this integration and
-the documented demo, then uploads their reports, evidence, and logs even when a
-step fails. See the [demo contract](docs/architecture/demo-v1.md) for its safety
-and artifact guarantees.
+`agent-browser` is not on `PATH`. The test discovers an installed Playwright
+Chromium automatically; set `CRAWLSON_REAL_BROWSER_BIN` to an absolute Chromium
+or Chrome for Testing executable when it lives elsewhere. The required CI job
+runs this integration and the documented demo, then uploads their reports,
+evidence, and logs even when a step fails. See the
+[demo contract](docs/architecture/demo-v1.md) for its safety and artifact
+guarantees.
 
 ### Journeys and action authorization
 
@@ -244,7 +264,10 @@ adds explicit capture-to-checkpoint evidence associations and render-safe
 bounds. Journey v3 preserves those contracts and adds only `follow_link`: a
 visible, enabled link with a declared exact same-origin destination. Journey v4
 adds an external `agent-browser` state file plus a required visible role
-checkpoint. Start with
+checkpoint. Journey v5 adds explicit setup, main, and fixture-cleanup phases;
+per-step effect classification; a disposable actor and self-expiring fixture;
+and narrowly validated `fill_text`, `click_button`, `check_absent`, and
+`ensure_absent` actions. Start with
 [`examples/read-only-journey.toml`](examples/read-only-journey.toml), its
 [`journey v2 JSON Schema`](schemas/journey-v2.schema.json), the preserved
 [`journey v1 JSON Schema`](schemas/journey-v1.schema.json), the
@@ -256,8 +279,11 @@ checkpoint. Start with
 [`journey v4 JSON Schema`](schemas/journey-v4.schema.json), the v3
 [`authenticated run-report JSON Schema`](schemas/run-report-v3.schema.json), the
 [`authentication state-file contract`](docs/architecture/authentication-v1.md),
-and the
-[`authorized-link contract`](docs/architecture/journey-v3.md).
+the [`authorized-link contract`](docs/architecture/journey-v3.md), the
+[`mutating example`](examples/mutating-pass.toml), the
+[`journey v5 JSON Schema`](schemas/journey-v5.schema.json), the v4
+[`mutating run-report JSON Schema`](schemas/run-report-v4.schema.json), and the
+[`disposable mutation contract`](docs/architecture/mutation-v1.md).
 
 Every valid v1 journey contains at least one deterministic checkpoint and one
 focused capture. Visible-text checkpoints and capture targets must also pass a
@@ -290,9 +316,9 @@ enabled state, and exact credential-free destination before preserving the
 pre-action raw and focused evidence. It dispatches one click without retry and
 passes only after the observed URL exactly matches the declaration. An
 off-origin destination is blocked; an uncertain post-dispatch result is an
-error with an unknown action effect. Generic clicks, buttons, typing, form
-submission, scripts, uploads, automated login flows, and mutations remain
-unavailable as journey capabilities. Internally, the driver click is constrained
+error with an unknown action effect. Generic clicks, arbitrary typing and form
+submission, scripts, uploads, automated login flows, and undeclared mutations
+remain unavailable as journey capabilities. Internally, the driver click is constrained
 to the declared CSS selector intersected with an anchor and its exact observed
 href. Following a link can still invoke application behavior, so an action grant
 must not be used as permission for a side-effecting production route.
@@ -302,15 +328,39 @@ exact-origin interceptor. Crawlson checks the full scheme, host, and port before
 and after each step and blocks an observed escape, but it cannot prove that a
 redirect did not transiently contact another port or scheme on the same host
 before returning. Use v3 only where that upstream limitation is acceptable;
-preventive exact-origin interception is a requirement for a future driver.
+preventive exact-origin interception is required for a mutating driver.
 
-Each run creates a unique directory beneath `crawlson-runs/` (or
-`--output-dir`) containing `report.json`, a required browser trace, and any
-requested screenshots. A `capture` step preserves the raw viewport PNG and
-creates a separate derivative with a red target outline and translucent
-near-black surrounding mask. Reproducible sidecar metadata records the source
-digest, adjacent box/screenshot command provenance, confirmed viewport scale,
-padding, colors, pinned PNG settings, and derivative digest.
+A v5 mutation declaration is also not permission. Every mutating main and
+cleanup step requires an exact `--allow-mutation JOURNEY@REVISION:STEP` grant;
+a non-literal-loopback target requires the complete set again through
+`--allow-production-mutation`. The disposable actor must be visibly verified
+before mutation, and setup must prove the fixture begins absent. The generated
+fixture token is public test data, not a secret. Each fill or exact POST button
+action is preflighted, captured, dispatched at most once, and independently
+verified. Cleanup then proves the fixture absent through the visible UI. An
+unknown effect or failed cleanup is an error and leaves an exact-origin recovery
+barrier in Crawlson's user-global state, so changing `--output-dir` cannot bypass
+it. Rerunning the exact same journey with its authentication, browser, target,
+and grants performs recovery-only visible cleanup and returns
+`recovery_completed`; run it once more to start a new mutation. A mismatched
+journey remains blocked.
+
+Because the pinned driver's hostname allowlist is insufficient for mutations,
+v5 additionally requires `--browser-executable` naming Chromium or Chrome for
+Testing. Crawlson loads an owned Manifest V3 network extension which allows only
+the exact HTTP(S) scheme, host, and effective port and blocks other HTTP(S),
+WebSocket, and WebTransport requests. A per-run extension marker is attested
+immediately before every mutation. See the mutation contract for the complete
+authorization, browser, recovery, and outcome rules.
+
+Each accepted run creates a unique directory beneath `crawlson-runs/` (or
+`--output-dir`) containing `report.json` and any retained artifacts. Completed
+browser executions require a trace; a preflight block can have no browser
+artifacts. A `capture` step preserves the raw viewport PNG and creates a separate
+derivative with a red target outline and translucent near-black surrounding mask.
+Reproducible sidecar metadata records the source digest, adjacent box/screenshot
+command provenance, confirmed viewport scale, padding, colors, pinned PNG
+settings, and derivative digest.
 
 Driver commands default to a 20-second deadline and normal journey execution
 to a five-minute deadline. Use `--action-timeout-seconds` (1–29) and
@@ -341,26 +391,32 @@ agent-browser envelope succeeded before capability-specific validation.
 `crawlson render RUN_DIRECTORY --journey JOURNEY` is an offline consumer of a
 completed run; `clson render` is identical. It launches no browser and accepts
 no arbitrary output location. The CLI-supplied run directory is the only file
-authority. Before writing, Crawlson strictly validates report v1, v2, or v3,
+authority. Before writing, Crawlson strictly validates report v1, v2, v3, or v4,
 matches the exact journey digest/identity/revision/origin, checks the complete
 executed step sequence, and rehashes every registered artifact. Symlinks, path escapes,
 missing evidence, source drift, focus-sidecar mismatches, incomplete cleanup,
 and contradictory outcomes fail closed.
 
 A final clean pass may produce `render/guide.md` plus deterministic local copies
-of its focused images, but only for passed `capture` or `follow_link` steps that
+of its focused images, but only for passed evidence actions that
 declare `guide_instruction` and have a verified raw/focused/sidecar evidence
 chain. The guide links the focus image with its vivid red action-area box and
 dimmed near-black surrounding page. Read-only captures are labeled as the
 reader's next action. A link step is described as executed only when its one
-click and exact post-action URL were both verified.
+click and exact post-action URL were both verified. A mutation is described as
+executed only after its one-shot dispatch, deterministic effect, fixture cleanup,
+and recovery-barrier removal all verify.
 
 A final deterministic checkpoint failure produces `render/findings.json` and
 `render/findings.md`. Each finding is `untriaged` rather than assigning invented
 impact, includes the executed reproduction prefix, and links the verified run
 report and trace. A later focused capture is attached only when that capture
 explicitly declares v2 `evidence_for = ["earlier-checkpoint-id"]`; chronology alone
-never creates evidence provenance.
+never creates evidence provenance. Mutation findings add public-fixture input,
+button, postcondition, and main-journey fixture-absence checkpoint failure kinds
+plus sanitized reproduction actions. They are publishable only after fixture
+cleanup and the recovery barrier both verify. An initial-absence failure during
+fixture setup remains blocked and non-publishable.
 
 `render/render-report.json` records the deterministic outcome and output
 digests. Output is staged and committed as one renderer-owned directory;
@@ -370,7 +426,8 @@ usage exits 2, valid non-publishable runs exit 3, and invalid/incomplete render
 inputs exit 4. See the published
 [`render report`](schemas/render-report-v1.schema.json),
 [`findings v1`](schemas/findings-v1.schema.json),
-[`action findings v2`](schemas/findings-v2.schema.json), and
+[`action findings v2`](schemas/findings-v2.schema.json),
+[`mutation findings v3`](schemas/findings-v3.schema.json), and
 [`render contract`](docs/architecture/render-v1.md).
 
 Artifact hashing establishes consistency with the local run report, not

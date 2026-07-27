@@ -29,6 +29,8 @@ expect_status() {
 help_output="$(bash "$repo_root/scripts/demo.sh" --help)"
 [[ "$help_output" == *"--crawlson-bin PATH --demo-bin PATH"* ]] \
   || fail "help did not document packaged binary overrides"
+[[ "$help_output" == *"--browser-executable PATH"* ]] \
+  || fail "help did not document the extension-capable browser override"
 
 mkdir -p "$test_root/bin"
 cat >"$test_root/bin/crawlson" <<'SCRIPT'
@@ -61,11 +63,26 @@ cat >"$test_root/bin/agent-browser" <<'SCRIPT'
 #!/usr/bin/env bash
 exit 26
 SCRIPT
+cat >"$test_root/bin/chromium" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\n' 'Chromium 140.0.0.0'
+  exit 0
+fi
+exit 27
+SCRIPT
 chmod +x "$test_root/bin/crawlson" "$test_root/bin/crawlson-demo" \
-  "$test_root/bin/cargo" "$test_root/bin/agent-browser"
+  "$test_root/bin/cargo" "$test_root/bin/agent-browser" \
+  "$test_root/bin/chromium"
+
+mkdir -p "$test_root/browser-cache/chromium-1400/chrome-linux"
+cp "$test_root/bin/chromium" \
+  "$test_root/browser-cache/chromium-1400/chrome-linux/chrome"
+chmod +x "$test_root/browser-cache/chromium-1400/chrome-linux/chrome"
 
 export CRAWLSON_TEST_CARGO_MARKER="$test_root/cargo-invocation"
 expect_status 25 env PATH="$test_root/bin:$PATH" \
+  PLAYWRIGHT_BROWSERS_PATH="$test_root/browser-cache" \
   bash "$repo_root/scripts/demo.sh" \
   --output-dir "$test_root/source-output" \
   >"$test_root/source.stdout" 2>"$test_root/source.stderr"
@@ -75,6 +92,7 @@ rm "$CRAWLSON_TEST_CARGO_MARKER"
 
 expect_status 1 bash "$repo_root/scripts/demo.sh" \
   --crawlson-bin "$test_root/bin/crawlson" \
+  --browser-executable "$test_root/bin/chromium" \
   --output-dir "$test_root/missing-pair" \
   >"$test_root/missing-pair.stdout" 2>"$test_root/missing-pair.stderr"
 grep -F -- "--crawlson-bin and --demo-bin must be provided together" \
@@ -87,6 +105,7 @@ if [[ ! -x "$test_root/non-executable-demo" ]]; then
   expect_status 1 bash "$repo_root/scripts/demo.sh" \
     --crawlson-bin "$test_root/bin/crawlson" \
     --demo-bin "$test_root/non-executable-demo" \
+    --browser-executable "$test_root/bin/chromium" \
     --output-dir "$test_root/non-executable" \
     >"$test_root/non-executable.stdout" 2>"$test_root/non-executable.stderr"
   grep -F -- "--demo-bin path is not executable" \
@@ -101,6 +120,7 @@ expect_status 23 env PATH="$test_root/bin:$PATH" \
   --crawlson-bin "$test_root/bin/crawlson" \
   --demo-bin "$test_root/bin/crawlson-demo" \
   --agent-browser agent-browser \
+  --browser-executable "$test_root/bin/chromium" \
   --output-dir "$test_root/packaged-output" \
   >"$test_root/packaged.stdout" 2>"$test_root/packaged.stderr"
 [[ ! -e "$CRAWLSON_TEST_CARGO_MARKER" ]] \
@@ -117,6 +137,7 @@ expect_status 1 env CRAWLSON_TEST_CLEANUP_MODE=1 \
   --crawlson-bin "$test_root/bin/crawlson" \
   --demo-bin "$test_root/bin/crawlson-demo" \
   --agent-browser agent-browser \
+  --browser-executable "$test_root/bin/chromium" \
   --output-dir "$test_root/cleanup-output" \
   >"$test_root/cleanup.stdout" 2>"$test_root/cleanup.stderr"
 [[ -z "$(find "$test_root/auth-tmp" -mindepth 1 -print -quit)" ]] \
@@ -143,6 +164,7 @@ expect_status 1 env CRAWLSON_TEST_CLEANUP_MODE=1 \
   --crawlson-bin "$test_root/bin/crawlson" \
   --demo-bin "$test_root/bin/crawlson-demo" \
   --agent-browser agent-browser \
+  --browser-executable "$test_root/bin/chromium" \
   --output-dir "$test_root/cleanup-failure-output" \
   >"$test_root/cleanup-failure.stdout" 2>"$test_root/cleanup-failure.stderr"
 cleanup_failure_stderr="$(<"$test_root/cleanup-failure.stderr")"

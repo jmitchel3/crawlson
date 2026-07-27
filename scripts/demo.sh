@@ -5,6 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 output_dir="$repo_root/crawlson-demo-output"
 agent_browser="agent-browser"
+browser_executable=""
 crawlson_bin=""
 demo_bin=""
 demo_pid=""
@@ -114,6 +115,18 @@ require_private_value_absent() {
   esac
 }
 
+require_focus_overlay() {
+  local path="$1"
+  local compact
+  compact="$(tr -d '[:space:]' <"$path")"
+  [[ "$compact" == *'"renderer_algorithm":"focus-overlay-v1"'* ]] \
+    || fail "focused evidence did not use the expected renderer: $path"
+  [[ "$compact" == *'"mask_rgba":[0,0,0,166]'* ]] \
+    || fail "focused evidence did not dim its surroundings: $path"
+  [[ "$compact" == *'"outline_rgba":[255,45,45,255]'* ]] \
+    || fail "focused evidence did not use the vivid red action outline: $path"
+}
+
 resolve_executable() {
   local option="$1"
   local path="$2"
@@ -134,9 +147,70 @@ resolve_agent_browser() {
   resolve_executable --agent-browser "$candidate"
 }
 
+browser_is_extension_capable() {
+  local version
+  version="$("$1" --version 2>/dev/null || true)"
+  [[ "$version" == *"Chrome for Testing"* || "$version" == *"Chromium"* ]]
+}
+
+resolve_browser_executable() {
+  local candidate="$1"
+  [[ ! -L "$candidate" ]] \
+    || fail "--browser-executable path must not be a symbolic link: $candidate"
+  candidate="$(resolve_executable --browser-executable "$candidate")"
+  browser_is_extension_capable "$candidate" \
+    || fail "--browser-executable must identify Chromium or Chrome for Testing"
+  printf '%s\n' "$candidate"
+}
+
+discover_browser_executable() {
+  local roots=()
+  local root candidate
+  if [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
+    roots+=("$PLAYWRIGHT_BROWSERS_PATH")
+  fi
+  if [[ -n "${HOME:-}" ]]; then
+    roots+=(
+      "$HOME/.cache/ms-playwright"
+      "$HOME/Library/Caches/ms-playwright"
+    )
+  fi
+  if [[ -n "${LOCALAPPDATA:-}" ]]; then
+    roots+=("$LOCALAPPDATA/ms-playwright")
+  fi
+
+  for root in "${roots[@]}"; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r candidate; do
+      case "$candidate" in
+        */chromium-*/chrome-linux*/chrome|\
+        */chromium-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+        */chromium-*/chrome-win*/chrome.exe)
+          if [[ -f "$candidate" && -x "$candidate" ]] \
+            && browser_is_extension_capable "$candidate"; then
+            resolve_browser_executable "$candidate"
+            return 0
+          fi
+          ;;
+      esac
+    done < <(find "$root" -type f -print 2>/dev/null | sort -r)
+  done
+  return 1
+}
+
+materialize_journey() {
+  local source="$1"
+  local destination="$2"
+  sed "s|origin = \"http://127.0.0.1:4173\"|origin = \"$origin\"|" \
+    "$source" >"$destination"
+  grep -F "origin = \"$origin\"" "$destination" >/dev/null \
+    || fail "could not bind journey to the ephemeral demo origin: $source"
+}
+
 usage() {
   cat <<'USAGE'
-Usage: scripts/demo.sh [--agent-browser PATH] [--output-dir DIRECTORY]
+Usage: scripts/demo.sh [--agent-browser PATH] [--browser-executable PATH]
+                       [--output-dir DIRECTORY]
                        [--crawlson-bin PATH --demo-bin PATH]
 
 Runs the passing, failing, and blocked Crawlson demo journeys and preserves all
@@ -151,6 +225,12 @@ while [[ $# -gt 0 ]]; do
     --agent-browser)
       [[ $# -ge 2 ]] || fail "--agent-browser requires a path"
       agent_browser="$2"
+      shift 2
+      ;;
+    --browser-executable)
+      [[ $# -ge 2 ]] || fail "--browser-executable requires a path"
+      [[ -n "$2" ]] || fail "--browser-executable requires a non-empty path"
+      browser_executable="$2"
       shift 2
       ;;
     --output-dir)
@@ -188,6 +268,12 @@ if [[ -n "$crawlson_bin" || -n "$demo_bin" ]]; then
   demo_bin="$(resolve_executable --demo-bin "$demo_bin")"
 fi
 agent_browser="$(resolve_agent_browser "$agent_browser")"
+if [[ -n "$browser_executable" ]]; then
+  browser_executable="$(resolve_browser_executable "$browser_executable")"
+else
+  browser_executable="$(discover_browser_executable)" \
+    || fail "no extension-capable Chromium or Chrome for Testing executable was found; provide --browser-executable"
+fi
 
 trap cleanup EXIT
 trap 'exit_after_signal 130' INT
@@ -205,6 +291,7 @@ output_dir="$(cd "$output_dir" && pwd)"
 cd "$repo_root"
 export CRAWLSON_NO_UPDATE_CHECK=1
 export CRAWLSON_OFFLINE=1
+export CRAWLSON_HOME="$output_dir/crawlson-state"
 
 if [[ -z "$crawlson_bin" ]]; then
   cargo build --locked --bins
@@ -216,7 +303,7 @@ fi
 
 "$crawlson_bin" doctor --json --agent-browser "$agent_browser" >"$output_dir/doctor.json"
 
-"$demo_bin" --port 4173 --json >"$output_dir/demo-ready.json" 2>"$output_dir/demo-server.log" &
+"$demo_bin" --port 0 --json >"$output_dir/demo-ready.json" 2>"$output_dir/demo-server.log" &
 demo_pid=$!
 for _ in {1..200}; do
   if ! kill -0 "$demo_pid" 2>/dev/null; then
@@ -229,7 +316,21 @@ for _ in {1..200}; do
 done
 
 origin="$(json_string origin "$output_dir/demo-ready.json")"
-[[ "$origin" == "http://127.0.0.1:4173" ]] || fail "demo server emitted an unexpected origin"
+[[ "$origin" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] \
+  || fail "demo server emitted an unexpected origin"
+
+journeys_dir="$output_dir/journeys"
+mkdir -p "$journeys_dir"
+for journey_name in \
+  authenticated-pass \
+  demo-fail \
+  demo-pass \
+  follow-link-fail \
+  follow-link-pass \
+  mutating-pass; do
+  materialize_journey "$repo_root/examples/$journey_name.toml" \
+    "$journeys_dir/$journey_name.toml"
+done
 
 auth_storage_value="crawlson-demo-fixture-$demo_pid"
 auth_state_dir="$(mktemp -d "${TMPDIR:-/tmp}/crawlson-auth-demo.XXXXXX")"
@@ -241,29 +342,29 @@ chmod 600 "$auth_state_path"
 
 runs_dir="$output_dir/runs"
 expect_exit 0 "$output_dir/pass-run.json" "$output_dir/pass-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/demo-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/demo-pass.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 pass_run_dir="$(json_string run_directory "$output_dir/pass-run.json")"
 [[ -n "$pass_run_dir" ]] || fail "passing report omitted its run directory"
 expect_exit 0 "$output_dir/pass-render.json" "$output_dir/pass-render.stderr" \
   "$crawlson_bin" --json render "$pass_run_dir" \
-  --journey "$repo_root/examples/demo-pass.toml"
+  --journey "$journeys_dir/demo-pass.toml"
 
 expect_exit 1 "$output_dir/fail-run.json" "$output_dir/fail-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/demo-fail.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/demo-fail.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 fail_run_dir="$(json_string run_directory "$output_dir/fail-run.json")"
 [[ -n "$fail_run_dir" ]] || fail "failing report omitted its run directory"
 expect_exit 1 "$output_dir/fail-render.json" "$output_dir/fail-render.stderr" \
   "$crawlson_bin" --json render "$fail_run_dir" \
-  --journey "$repo_root/examples/demo-fail.toml"
+  --journey "$journeys_dir/demo-fail.toml"
 
 expect_exit 3 "$output_dir/blocked-run.json" "$output_dir/blocked-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/demo-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/demo-pass.toml" \
   --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
 expect_exit 0 "$output_dir/action-pass-run.json" "$output_dir/action-pass-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/follow-link-pass.toml" \
   --allow-origin "$origin" \
   --allow-action "demo.follow-link-pass@1:follow-continue" \
   --output-dir "$runs_dir" --agent-browser "$agent_browser"
@@ -271,10 +372,10 @@ action_pass_run_dir="$(json_string run_directory "$output_dir/action-pass-run.js
 [[ -n "$action_pass_run_dir" ]] || fail "action report omitted its run directory"
 expect_exit 0 "$output_dir/action-pass-render.json" "$output_dir/action-pass-render.stderr" \
   "$crawlson_bin" --json render "$action_pass_run_dir" \
-  --journey "$repo_root/examples/follow-link-pass.toml"
+  --journey "$journeys_dir/follow-link-pass.toml"
 
 expect_exit 1 "$output_dir/action-fail-run.json" "$output_dir/action-fail-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/follow-link-fail.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/follow-link-fail.toml" \
   --allow-origin "$origin" \
   --allow-action "demo.follow-link-fail@1:follow-broken-redirect" \
   --output-dir "$runs_dir" --agent-browser "$agent_browser"
@@ -282,34 +383,59 @@ action_fail_run_dir="$(json_string run_directory "$output_dir/action-fail-run.js
 [[ -n "$action_fail_run_dir" ]] || fail "failing action report omitted its run directory"
 expect_exit 1 "$output_dir/action-fail-render.json" "$output_dir/action-fail-render.stderr" \
   "$crawlson_bin" --json render "$action_fail_run_dir" \
-  --journey "$repo_root/examples/follow-link-fail.toml"
+  --journey "$journeys_dir/follow-link-fail.toml"
 
 expect_exit 3 "$output_dir/action-blocked-run.json" "$output_dir/action-blocked-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/follow-link-pass.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
 expect_exit 0 "$output_dir/auth-pass-run.json" "$output_dir/auth-pass-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/authenticated-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/authenticated-pass.toml" \
   --allow-origin "$origin" --auth-state "$auth_state_path" \
   --output-dir "$runs_dir" --agent-browser "$agent_browser"
 auth_pass_run_dir="$(json_string run_directory "$output_dir/auth-pass-run.json")"
 [[ -n "$auth_pass_run_dir" ]] || fail "authenticated report omitted its run directory"
 expect_exit 0 "$output_dir/auth-pass-render.json" "$output_dir/auth-pass-render.stderr" \
   "$crawlson_bin" --json render "$auth_pass_run_dir" \
-  --journey "$repo_root/examples/authenticated-pass.toml"
+  --journey "$journeys_dir/authenticated-pass.toml"
 expect_exit 3 "$output_dir/auth-blocked-run.json" "$output_dir/auth-blocked-run.stderr" \
-  "$crawlson_bin" --json run "$repo_root/examples/authenticated-pass.toml" \
+  "$crawlson_bin" --json run "$journeys_dir/authenticated-pass.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
-remove_auth_state || fail "could not remove private authentication state"
+mutation_grants=(
+  "demo.mutating-pass@1:fill-fixture-name"
+  "demo.mutating-pass@1:create-fixture"
+  "demo.mutating-pass@1:ensure-fixture-absent"
+)
+mutation_arguments=()
+for grant in "${mutation_grants[@]}"; do
+  mutation_arguments+=(--allow-mutation "$grant")
+done
+expect_exit 0 "$output_dir/mutation-pass-run.json" "$output_dir/mutation-pass-run.stderr" \
+  "$crawlson_bin" --json run "$journeys_dir/mutating-pass.toml" \
+  --allow-origin "$origin" "${mutation_arguments[@]}" \
+  --auth-state "$auth_state_path" --browser-executable "$browser_executable" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+mutation_pass_run_dir="$(json_string run_directory "$output_dir/mutation-pass-run.json")"
+[[ -n "$mutation_pass_run_dir" ]] || fail "mutation report omitted its run directory"
+expect_exit 0 "$output_dir/mutation-pass-render.json" "$output_dir/mutation-pass-render.stderr" \
+  "$crawlson_bin" --json render "$mutation_pass_run_dir" \
+  --journey "$journeys_dir/mutating-pass.toml"
 
-journeys_dir="$output_dir/journeys"
-mkdir -p "$journeys_dir"
-cp "$repo_root/examples/demo-pass.toml" "$journeys_dir/demo-pass.toml"
-cp "$repo_root/examples/demo-fail.toml" "$journeys_dir/demo-fail.toml"
-cp "$repo_root/examples/follow-link-pass.toml" "$journeys_dir/follow-link-pass.toml"
-cp "$repo_root/examples/follow-link-fail.toml" "$journeys_dir/follow-link-fail.toml"
-cp "$repo_root/examples/authenticated-pass.toml" "$journeys_dir/authenticated-pass.toml"
+expect_exit 3 "$output_dir/mutation-grant-blocked-run.json" \
+  "$output_dir/mutation-grant-blocked-run.stderr" \
+  "$crawlson_bin" --json run "$journeys_dir/mutating-pass.toml" \
+  --allow-origin "$origin" --auth-state "$auth_state_path" \
+  --browser-executable "$browser_executable" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+expect_exit 3 "$output_dir/mutation-auth-blocked-run.json" \
+  "$output_dir/mutation-auth-blocked-run.stderr" \
+  "$crawlson_bin" --json run "$journeys_dir/mutating-pass.toml" \
+  --allow-origin "$origin" "${mutation_arguments[@]}" \
+  --browser-executable "$browser_executable" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+
+remove_auth_state || fail "could not remove private authentication state"
 
 cat >"$output_dir/guide-collection.toml" <<EOF
 schema_version = 1
@@ -343,6 +469,12 @@ key = "authenticated-viewer"
 order = 30
 run = "runs/$(basename "$auth_pass_run_dir")"
 journey = "journeys/authenticated-pass.toml"
+
+[[topics.guides]]
+key = "create-disposable-fixture"
+order = 40
+run = "runs/$(basename "$mutation_pass_run_dir")"
+journey = "journeys/mutating-pass.toml"
 EOF
 
 expect_exit 0 "$output_dir/collection-build.json" "$output_dir/collection-build.stderr" \
@@ -431,7 +563,7 @@ require_json_fragment "$output_dir/action-fail-run.json" \
 require_json_fragment "$output_dir/action-fail-run.json" \
   '"action_state":"driver_acknowledged"' "post-action acknowledged state"
 require_json_fragment "$output_dir/action-fail-run.json" \
-  '"observed_url":"http://127.0.0.1:4173/unexpected"' \
+  "\"observed_url\":\"$origin/unexpected\"" \
   "post-action observed destination"
 require_json_fragment "$output_dir/action-fail-render.json" '"status":"findings_ready"' \
   "post-action findings status"
@@ -453,9 +585,37 @@ require_json_fragment "$output_dir/auth-blocked-run.json" \
 require_json_fragment "$output_dir/auth-blocked-run.json" \
   '"driver":{"name":"agent-browser","commands":[]}' \
   "authentication preflight empty driver command list"
+require_json_fragment "$output_dir/mutation-pass-run.json" '"schema_version":4' \
+  "mutation run report version"
+require_json_fragment "$output_dir/mutation-pass-run.json" '"outcome":"passed"' \
+  "mutation outcome"
+require_json_fragment "$output_dir/mutation-pass-run.json" \
+  '"execution_outcome":"passed"' "mutation execution outcome"
+require_json_fragment "$output_dir/mutation-pass-run.json" \
+  '"setup_status":"passed"' "mutation fixture setup status"
+require_json_fragment "$output_dir/mutation-pass-run.json" \
+  '"mutation_attempted":true' "mutation fixture dispatch status"
+require_json_fragment "$output_dir/mutation-pass-run.json" \
+  '"cleanup_status":"passed"' "mutation fixture cleanup status"
+require_json_fragment "$output_dir/mutation-pass-run.json" \
+  '"recovery_required":false' "mutation recovery status"
+require_json_fragment "$output_dir/mutation-pass-render.json" '"status":"guide_ready"' \
+  "mutation guide status"
+require_json_fragment "$output_dir/mutation-grant-blocked-run.json" \
+  '"reason":{"code":"mutation_authorization_mismatch"' \
+  "missing mutation authorization reason"
+require_json_fragment "$output_dir/mutation-grant-blocked-run.json" \
+  '"driver":{"name":"agent-browser","commands":[]}' \
+  "mutation authorization preflight empty driver command list"
+require_json_fragment "$output_dir/mutation-auth-blocked-run.json" \
+  '"reason":{"code":"authentication_state_missing"' \
+  "missing disposable authentication state reason"
+require_json_fragment "$output_dir/mutation-auth-blocked-run.json" \
+  '"driver":{"name":"agent-browser","commands":[]}' \
+  "mutation authentication preflight empty driver command list"
 require_json_fragment "$output_dir/collection-build.json" '"status":"ready"' \
   "guide collection build status"
-require_json_fragment "$output_dir/collection-build.json" '"guides":3' \
+require_json_fragment "$output_dir/collection-build.json" '"guides":4' \
   "guide collection guide count"
 cmp -s "$output_dir/collection-build.json" "$output_dir/collection-check.json" \
   || fail "guide collection build and check reports differ"
@@ -505,6 +665,29 @@ require_artifact "$auth_pass_run_dir/evidence/003-capture-viewer-access.focused.
 require_artifact "$auth_pass_run_dir/evidence/003-capture-viewer-access.focused.json"
 require_artifact "$auth_pass_run_dir/render/guide.md"
 
+for stem in 005-fill-fixture-name 006-create-fixture 008-ensure-fixture-absent; do
+  require_artifact "$mutation_pass_run_dir/evidence/$stem.raw.png"
+  require_artifact "$mutation_pass_run_dir/evidence/$stem.focused.png"
+  require_artifact "$mutation_pass_run_dir/evidence/$stem.focused.json"
+  require_focus_overlay "$mutation_pass_run_dir/evidence/$stem.focused.json"
+  cmp -s "$mutation_pass_run_dir/evidence/$stem.raw.png" \
+    "$mutation_pass_run_dir/evidence/$stem.focused.png" \
+    && fail "focused mutation evidence was identical to its raw screenshot: $stem"
+done
+require_artifact "$mutation_pass_run_dir/render/guide.md"
+require_artifact "$mutation_pass_run_dir/render/001-focused.png"
+require_artifact "$mutation_pass_run_dir/render/002-focused.png"
+cmp -s "$mutation_pass_run_dir/evidence/005-fill-fixture-name.focused.png" \
+  "$mutation_pass_run_dir/render/001-focused.png" \
+  || fail "mutation field guide image does not match verified focused evidence"
+cmp -s "$mutation_pass_run_dir/evidence/006-create-fixture.focused.png" \
+  "$mutation_pass_run_dir/render/002-focused.png" \
+  || fail "mutation button guide image does not match verified focused evidence"
+if [[ -d "$CRAWLSON_HOME/.crawlson-recovery" ]] \
+  && [[ -n "$(find "$CRAWLSON_HOME/.crawlson-recovery" -type f -print -quit)" ]]; then
+  fail "successful fixture cleanup retained a pending recovery record"
+fi
+
 require_artifact "$output_dir/guide-site/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/review-continue/index.md"
@@ -513,6 +696,9 @@ require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/
 require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/001-focused.png"
 require_artifact "$output_dir/guide-site/topics/getting-started/authenticated-viewer/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/authenticated-viewer/001-focused.png"
+require_artifact "$output_dir/guide-site/topics/getting-started/create-disposable-fixture/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/create-disposable-fixture/001-focused.png"
+require_artifact "$output_dir/guide-site/topics/getting-started/create-disposable-fixture/002-focused.png"
 
 require_private_value_absent "$auth_storage_value"
 require_private_value_absent "$auth_state_scan_path"
@@ -522,6 +708,12 @@ cmp -s "$pass_run_dir/evidence/003-capture-action.focused.png" \
 cmp -s "$action_pass_run_dir/evidence/002-follow-continue.focused.png" \
   "$output_dir/guide-site/topics/getting-started/follow-continue/001-focused.png" \
   || fail "collection action image does not match verified focused evidence"
+cmp -s "$mutation_pass_run_dir/evidence/005-fill-fixture-name.focused.png" \
+  "$output_dir/guide-site/topics/getting-started/create-disposable-fixture/001-focused.png" \
+  || fail "collection mutation field image does not match verified focused evidence"
+cmp -s "$mutation_pass_run_dir/evidence/006-create-fixture.focused.png" \
+  "$output_dir/guide-site/topics/getting-started/create-disposable-fixture/002-focused.png" \
+  || fail "collection mutation button image does not match verified focused evidence"
 require_artifact "$output_dir/guide-review/review/index.md"
 require_artifact "$output_dir/guide-review/review/known-failures/wrong-heading/render/findings.json"
 require_artifact "$output_dir/guide-review/review/known-failures/broken-redirect/render/findings.json"

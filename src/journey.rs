@@ -15,6 +15,7 @@ const MAX_SELECTOR_BYTES: usize = 4_096;
 const MAX_EXPECTED_BYTES: usize = 65_536;
 const MAX_ALT_TEXT_BYTES: usize = 4_096;
 const MAX_GUIDE_INSTRUCTION_BYTES: usize = 16_384;
+const MAX_FIXTURE_LIFETIME_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,8 +25,14 @@ pub struct JourneyDocument {
     pub target: TargetSpec,
     #[serde(default)]
     pub authentication: Option<AuthRequirement>,
+    #[serde(default)]
+    pub fixture: Option<FixtureSpec>,
     pub evidence: EvidencePolicy,
+    #[serde(default)]
+    pub setup_steps: Vec<StepSpec>,
     pub steps: Vec<StepSpec>,
+    #[serde(default)]
+    pub cleanup_steps: Vec<StepSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +50,7 @@ pub struct JourneyMeta {
 #[serde(rename_all = "snake_case")]
 pub enum JourneyMode {
     ReadOnly,
+    Mutating,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +66,21 @@ pub struct AuthRequirement {
     pub role: String,
     #[serde(default)]
     pub verification_step: Option<String>,
+    #[serde(default)]
+    pub disposable_actor: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureSpec {
+    pub kind: FixtureKind,
+    pub maximum_lifetime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureKind {
+    SelfExpiringUi,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,7 +99,16 @@ pub struct StepSpec {
     pub guide_instruction: Option<String>,
     #[serde(default)]
     pub evidence_for: Vec<String>,
+    #[serde(default)]
+    pub effect: Option<StepEffect>,
     pub action: StepAction,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepEffect {
+    ReadOnly,
+    Mutating,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,6 +132,33 @@ pub enum StepAction {
     },
     FollowLink {
         selector: String,
+        expected_path: String,
+        alt_text: String,
+    },
+    FillText {
+        selector: String,
+        value: String,
+        alt_text: String,
+    },
+    ClickButton {
+        selector: String,
+        form_selector: String,
+        action_path: String,
+        expected_path: String,
+        verify_selector: String,
+        expected_text: String,
+        alt_text: String,
+    },
+    CheckAbsent {
+        selector: String,
+        expected_text: String,
+    },
+    EnsureAbsent {
+        status_selector: String,
+        expected_text: String,
+        button_selector: String,
+        form_selector: String,
+        action_path: String,
         expected_path: String,
         alt_text: String,
     },
@@ -128,8 +187,11 @@ pub struct ValidatedJourney {
     pub meta: JourneyMeta,
     pub origin: Origin,
     pub authentication: Option<AuthRequirement>,
+    pub fixture: Option<FixtureSpec>,
     pub evidence: EvidencePolicy,
+    pub setup_steps: Vec<ValidatedStep>,
     pub steps: Vec<ValidatedStep>,
+    pub cleanup_steps: Vec<ValidatedStep>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +200,16 @@ pub struct ValidatedStep {
     pub title: String,
     pub guide_instruction: Option<String>,
     pub evidence_for: Vec<String>,
+    pub effect: StepEffect,
     pub action: ValidatedAction,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepPhase {
+    Setup,
+    Journey,
+    FixtureCleanup,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +234,67 @@ pub enum ValidatedAction {
         expected_url: Url,
         alt_text: String,
     },
+    FillText {
+        selector: String,
+        value: MutationValue,
+        alt_text: String,
+    },
+    ClickButton {
+        selector: String,
+        form_selector: String,
+        action_url: Url,
+        expected_url: Url,
+        verify_selector: String,
+        expected_text: String,
+        alt_text: String,
+    },
+    CheckAbsent {
+        selector: String,
+        expected_text: String,
+    },
+    EnsureAbsent {
+        status_selector: String,
+        expected_text: String,
+        button_selector: String,
+        form_selector: String,
+        action_url: Url,
+        expected_url: Url,
+        alt_text: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationValue {
+    FixtureToken,
+}
+
+impl ValidatedAction {
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            Self::FillText { .. } | Self::ClickButton { .. } | Self::EnsureAbsent { .. }
+        )
+    }
+}
+
+impl ValidatedJourney {
+    pub fn phase_steps(&self) -> impl Iterator<Item = (StepPhase, &ValidatedStep)> {
+        self.setup_steps
+            .iter()
+            .map(|step| (StepPhase::Setup, step))
+            .chain(self.steps.iter().map(|step| (StepPhase::Journey, step)))
+            .chain(
+                self.cleanup_steps
+                    .iter()
+                    .map(|step| (StepPhase::FixtureCleanup, step)),
+            )
+    }
+
+    pub fn mutating_steps(&self) -> impl Iterator<Item = &ValidatedStep> {
+        self.phase_steps()
+            .map(|(_, step)| step)
+            .filter(|step| step.action.is_mutating())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,6 +326,8 @@ impl Origin {
         let host = url
             .host_str()
             .ok_or_else(|| JourneyError::Validation("target origin requires a host".to_owned()))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_ascii_lowercase();
         if host.ends_with('.') {
             return Err(JourneyError::Validation(
@@ -219,6 +353,8 @@ impl Origin {
         let host = url
             .host_str()
             .ok_or_else(|| JourneyError::Validation("URL requires a host".to_owned()))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_ascii_lowercase();
         let effective_port = url
             .port_or_known_default()
@@ -236,6 +372,12 @@ impl Origin {
 
     pub fn base_url(&self) -> Url {
         Url::parse(&format!("{self}/")).expect("validated origin formats as a URL")
+    }
+
+    pub fn is_literal_loopback(&self) -> bool {
+        self.host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
     }
 }
 
@@ -298,9 +440,9 @@ pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
 pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError> {
     let document = loaded.document;
     let schema_version = document.schema_version;
-    if !matches!(schema_version, 1..=4) {
+    if !matches!(schema_version, 1..=5) {
         return Err(JourneyError::Validation(format!(
-            "unsupported schema_version {schema_version}; expected 1, 2, 3, or 4"
+            "unsupported schema_version {schema_version}; expected 1, 2, 3, 4, or 5"
         )));
     }
     validate_id("journey", &document.journey.id)?;
@@ -312,9 +454,14 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
             "journey revision must be greater than zero".to_owned(),
         ));
     }
-    if document.steps.is_empty() || document.steps.len() > MAX_STEPS {
+    let total_steps = document
+        .setup_steps
+        .len()
+        .saturating_add(document.steps.len())
+        .saturating_add(document.cleanup_steps.len());
+    if document.steps.is_empty() || total_steps > MAX_STEPS {
         return Err(JourneyError::Validation(format!(
-            "journey must contain 1 to {MAX_STEPS} steps"
+            "journey must contain 1 to {MAX_STEPS} total steps"
         )));
     }
     if !document.evidence.trace {
@@ -328,40 +475,194 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
         ));
     }
 
+    if schema_version == 5 {
+        if document.journey.mode != JourneyMode::Mutating {
+            return Err(JourneyError::Validation(
+                "journey schema version 5 requires mode = 'mutating'".to_owned(),
+            ));
+        }
+        let fixture = document.fixture.as_ref().ok_or_else(|| {
+            JourneyError::Validation(
+                "journey schema version 5 requires a fixture contract".to_owned(),
+            )
+        })?;
+        if fixture.maximum_lifetime_seconds == 0
+            || fixture.maximum_lifetime_seconds > MAX_FIXTURE_LIFETIME_SECONDS
+        {
+            return Err(JourneyError::Validation(format!(
+                "fixture maximum_lifetime_seconds must be between 1 and {MAX_FIXTURE_LIFETIME_SECONDS}"
+            )));
+        }
+        if document.setup_steps.is_empty() || document.cleanup_steps.is_empty() {
+            return Err(JourneyError::Validation(
+                "mutating journeys require declared setup_steps and cleanup_steps".to_owned(),
+            ));
+        }
+    } else {
+        if document.journey.mode != JourneyMode::ReadOnly {
+            return Err(JourneyError::Validation(
+                "journey schema versions 1 through 4 require mode = 'read_only'".to_owned(),
+            ));
+        }
+        if document.fixture.is_some()
+            || !document.setup_steps.is_empty()
+            || !document.cleanup_steps.is_empty()
+        {
+            return Err(JourneyError::Validation(
+                "fixture phases require journey schema version 5".to_owned(),
+            ));
+        }
+    }
+
     validate_authentication_fields(schema_version, document.authentication.as_ref())?;
 
     let origin = Origin::parse(&document.target.origin)?;
     let base = origin.base_url();
     let mut identifiers = HashSet::new();
-    let mut steps = Vec::with_capacity(document.steps.len());
     let mut has_checkpoint = false;
     let mut has_guide_evidence = false;
     let mut prior_checkpoints = HashSet::new();
-    for step in document.steps {
+    let setup_steps = validate_step_phase(
+        schema_version,
+        StepPhase::Setup,
+        document.setup_steps,
+        &origin,
+        &base,
+        &mut identifiers,
+        &mut prior_checkpoints,
+        &mut has_checkpoint,
+        &mut has_guide_evidence,
+    )?;
+    let steps = validate_step_phase(
+        schema_version,
+        StepPhase::Journey,
+        document.steps,
+        &origin,
+        &base,
+        &mut identifiers,
+        &mut prior_checkpoints,
+        &mut has_checkpoint,
+        &mut has_guide_evidence,
+    )?;
+    let cleanup_steps = validate_step_phase(
+        schema_version,
+        StepPhase::FixtureCleanup,
+        document.cleanup_steps,
+        &origin,
+        &base,
+        &mut identifiers,
+        &mut prior_checkpoints,
+        &mut has_checkpoint,
+        &mut has_guide_evidence,
+    )?;
+    if !has_checkpoint || !has_guide_evidence {
+        let message = if schema_version < 3 {
+            "a journey requires at least one deterministic checkpoint and one focused capture"
+        } else {
+            "a journey requires at least one deterministic checkpoint and one focused evidence action"
+        };
+        return Err(JourneyError::Validation(message.to_owned()));
+    }
+
+    let all_steps = setup_steps
+        .iter()
+        .chain(steps.iter())
+        .chain(cleanup_steps.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_authentication_steps(schema_version, document.authentication.as_ref(), &all_steps)?;
+    if schema_version == 5 {
+        let verification_step = document
+            .authentication
+            .as_ref()
+            .and_then(|authentication| authentication.verification_step.as_deref())
+            .expect("v5 authentication fields were validated");
+        if !setup_steps.iter().any(|step| step.id == verification_step) {
+            return Err(JourneyError::Validation(
+                "mutation authentication verification_step must be declared in setup_steps"
+                    .to_owned(),
+            ));
+        }
+        if !setup_steps
+            .iter()
+            .any(|step| matches!(step.action, ValidatedAction::CheckAbsent { .. }))
+        {
+            return Err(JourneyError::Validation(
+                "mutating journey setup must verify that the disposable fixture is absent"
+                    .to_owned(),
+            ));
+        }
+        if !steps.iter().any(|step| step.action.is_mutating()) {
+            return Err(JourneyError::Validation(
+                "mutating journey main steps require at least one mutation".to_owned(),
+            ));
+        }
+        if !cleanup_steps
+            .iter()
+            .any(|step| matches!(step.action, ValidatedAction::EnsureAbsent { .. }))
+        {
+            return Err(JourneyError::Validation(
+                "mutating journey cleanup must contain an idempotent ensure_absent action"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    Ok(ValidatedJourney {
+        schema_version,
+        source_path: loaded.source_path,
+        source_sha256: loaded.source_sha256,
+        meta: document.journey,
+        origin,
+        authentication: document.authentication,
+        fixture: document.fixture,
+        evidence: document.evidence,
+        setup_steps,
+        steps,
+        cleanup_steps,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_step_phase(
+    schema_version: u8,
+    phase: StepPhase,
+    source: Vec<StepSpec>,
+    origin: &Origin,
+    base: &Url,
+    identifiers: &mut HashSet<String>,
+    prior_checkpoints: &mut HashSet<String>,
+    has_checkpoint: &mut bool,
+    has_guide_evidence: &mut bool,
+) -> Result<Vec<ValidatedStep>, JourneyError> {
+    let mut steps = Vec::with_capacity(source.len());
+    for step in source {
         validate_id("step", &step.id)?;
         if !identifiers.insert(step.id.clone()) {
             return Err(JourneyError::Validation(format!(
-                "duplicate step id '{}'",
+                "duplicate step id '{}' across journey phases",
                 step.id
             )));
         }
         validate_nonempty("step title", &step.title)?;
-        if let Some(instruction) = step.guide_instruction.as_deref() {
-            if instruction.trim().is_empty() {
-                return Err(JourneyError::Validation(format!(
-                    "step '{}' has an empty guide_instruction",
-                    step.id
-                )));
-            }
-            if schema_version >= 2
-                && (instruction.len() > MAX_GUIDE_INSTRUCTION_BYTES
-                    || has_disallowed_control(instruction))
-            {
-                return Err(JourneyError::Validation(format!(
-                    "step '{}' guide_instruction must contain at most {MAX_GUIDE_INSTRUCTION_BYTES} bytes and no unsupported control characters",
-                    step.id
-                )));
-            }
+        if phase != StepPhase::Journey
+            && (step.guide_instruction.is_some() || !step.evidence_for.is_empty())
+        {
+            return Err(JourneyError::Validation(format!(
+                "step '{}' may not publish guide content from setup or cleanup",
+                step.id
+            )));
+        }
+        if let Some(instruction) = step.guide_instruction.as_deref()
+            && (instruction.trim().is_empty()
+                || (schema_version >= 2
+                    && (instruction.len() > MAX_GUIDE_INSTRUCTION_BYTES
+                        || has_disallowed_control(instruction))))
+        {
+            return Err(JourneyError::Validation(format!(
+                "step '{}' guide_instruction must contain at most {MAX_GUIDE_INSTRUCTION_BYTES} bytes and no unsupported control characters",
+                step.id
+            )));
         }
         if schema_version == 1 && !step.evidence_for.is_empty() {
             return Err(JourneyError::Validation(format!(
@@ -379,72 +680,59 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
                 )));
             }
         }
-        let action = match step.action {
-            StepAction::Navigate { path } => ValidatedAction::Navigate {
-                url: validate_path(&origin, &base, &path, schema_version)?,
-            },
-            StepAction::CheckUrl { path } => ValidatedAction::CheckUrl {
-                url: {
-                    has_checkpoint = true;
-                    prior_checkpoints.insert(step.id.clone());
-                    validate_path(&origin, &base, &path, schema_version)?
-                },
-            },
-            StepAction::CheckText {
-                selector,
-                expected,
-                comparison,
-            } => {
-                validate_selector(&selector)?;
-                validate_nonempty("expected text", &expected)?;
-                if expected.len() > MAX_EXPECTED_BYTES {
-                    return Err(JourneyError::Validation(format!(
-                        "step '{}' expected text exceeds {MAX_EXPECTED_BYTES} bytes",
-                        step.id
-                    )));
-                }
-                has_checkpoint = true;
-                prior_checkpoints.insert(step.id.clone());
-                ValidatedAction::CheckText {
-                    selector,
-                    expected,
-                    comparison,
-                }
+        let action = validate_action(
+            schema_version,
+            phase,
+            &step.id,
+            step.guide_instruction.is_some(),
+            step.action,
+            origin,
+            base,
+        )?;
+        let effect = if schema_version == 5 {
+            let effect = step.effect.ok_or_else(|| {
+                JourneyError::Validation(format!(
+                    "step '{}' requires an explicit effect classification",
+                    step.id
+                ))
+            })?;
+            if (effect == StepEffect::Mutating) != action.is_mutating() {
+                return Err(JourneyError::Validation(format!(
+                    "step '{}' effect does not match its action",
+                    step.id
+                )));
             }
-            StepAction::Capture { selector, alt_text } => {
-                validate_selector(&selector)?;
-                validate_alt_text(&step.id, "capture", &alt_text)?;
-                has_guide_evidence = true;
-                ValidatedAction::Capture { selector, alt_text }
+            effect
+        } else {
+            if step.effect.is_some() || action.is_mutating() {
+                return Err(JourneyError::Validation(format!(
+                    "step '{}' mutation fields require journey schema version 5",
+                    step.id
+                )));
             }
-            StepAction::FollowLink {
-                selector,
-                expected_path,
-                alt_text,
-            } => {
-                if schema_version < 3 {
-                    return Err(JourneyError::Validation(format!(
-                        "step '{}' follow_link requires journey schema version 3",
-                        step.id
-                    )));
-                }
-                if step.guide_instruction.is_none() {
-                    return Err(JourneyError::Validation(format!(
-                        "step '{}' follow_link requires guide_instruction",
-                        step.id
-                    )));
-                }
-                validate_selector(&selector)?;
-                validate_alt_text(&step.id, "follow_link", &alt_text)?;
-                let expected_url = validate_path(&origin, &base, &expected_path, schema_version)?;
-                has_guide_evidence = true;
-                ValidatedAction::FollowLink {
-                    selector,
-                    expected_url,
-                    alt_text,
-                }
-            }
+            StepEffect::ReadOnly
         };
+        if matches!(
+            action,
+            ValidatedAction::CheckUrl { .. }
+                | ValidatedAction::CheckText { .. }
+                | ValidatedAction::CheckAbsent { .. }
+                | ValidatedAction::ClickButton { .. }
+                | ValidatedAction::EnsureAbsent { .. }
+        ) {
+            *has_checkpoint = true;
+            prior_checkpoints.insert(step.id.clone());
+        }
+        if matches!(
+            action,
+            ValidatedAction::Capture { .. }
+                | ValidatedAction::FollowLink { .. }
+                | ValidatedAction::FillText { .. }
+                | ValidatedAction::ClickButton { .. }
+        ) && phase == StepPhase::Journey
+        {
+            *has_guide_evidence = true;
+        }
         if !step.evidence_for.is_empty() && !matches!(action, ValidatedAction::Capture { .. }) {
             return Err(JourneyError::Validation(format!(
                 "step '{}' may declare evidence_for only on a capture action",
@@ -456,45 +744,231 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
             title: step.title,
             guide_instruction: step.guide_instruction,
             evidence_for: step.evidence_for,
+            effect,
             action,
         });
     }
-    if !has_checkpoint || !has_guide_evidence {
-        let message = if schema_version < 3 {
-            "a journey requires at least one deterministic checkpoint and one focused capture"
-        } else {
-            "a journey requires at least one deterministic checkpoint and one focused evidence action"
-        };
-        return Err(JourneyError::Validation(message.to_owned()));
+    Ok(steps)
+}
+
+fn validate_action(
+    schema_version: u8,
+    phase: StepPhase,
+    step_id: &str,
+    has_guide_instruction: bool,
+    action: StepAction,
+    origin: &Origin,
+    base: &Url,
+) -> Result<ValidatedAction, JourneyError> {
+    let action = match action {
+        StepAction::Navigate { path } => ValidatedAction::Navigate {
+            url: validate_path(origin, base, &path, schema_version)?,
+        },
+        StepAction::CheckUrl { path } => ValidatedAction::CheckUrl {
+            url: validate_path(origin, base, &path, schema_version)?,
+        },
+        StepAction::CheckText {
+            selector,
+            expected,
+            comparison,
+        } => {
+            validate_selector(&selector)?;
+            validate_expected(step_id, &expected)?;
+            ValidatedAction::CheckText {
+                selector,
+                expected,
+                comparison,
+            }
+        }
+        StepAction::Capture { selector, alt_text } => {
+            validate_selector(&selector)?;
+            validate_alt_text(step_id, "capture", &alt_text)?;
+            ValidatedAction::Capture { selector, alt_text }
+        }
+        StepAction::FollowLink {
+            selector,
+            expected_path,
+            alt_text,
+        } => {
+            if schema_version < 3 {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' follow_link requires journey schema version 3"
+                )));
+            }
+            if !has_guide_instruction {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' follow_link requires guide_instruction"
+                )));
+            }
+            validate_selector(&selector)?;
+            validate_alt_text(step_id, "follow_link", &alt_text)?;
+            ValidatedAction::FollowLink {
+                selector,
+                expected_url: validate_path(origin, base, &expected_path, schema_version)?,
+                alt_text,
+            }
+        }
+        StepAction::FillText {
+            selector,
+            value,
+            alt_text,
+        } => {
+            require_v5_main(schema_version, phase, step_id, "fill_text")?;
+            validate_simple_id_selector(step_id, &selector)?;
+            if value != "$fixture_token" {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' fill_text value must be the generated public $fixture_token"
+                )));
+            }
+            if !has_guide_instruction {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' fill_text requires guide_instruction"
+                )));
+            }
+            validate_alt_text(step_id, "fill_text", &alt_text)?;
+            ValidatedAction::FillText {
+                selector,
+                value: MutationValue::FixtureToken,
+                alt_text,
+            }
+        }
+        StepAction::ClickButton {
+            selector,
+            form_selector,
+            action_path,
+            expected_path,
+            verify_selector,
+            expected_text,
+            alt_text,
+        } => {
+            require_v5_main(schema_version, phase, step_id, "click_button")?;
+            validate_simple_id_selector(step_id, &selector)?;
+            validate_simple_id_selector(step_id, &form_selector)?;
+            validate_selector(&verify_selector)?;
+            validate_expected(step_id, &expected_text)?;
+            validate_alt_text(step_id, "click_button", &alt_text)?;
+            if !has_guide_instruction {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' click_button requires guide_instruction"
+                )));
+            }
+            ValidatedAction::ClickButton {
+                selector,
+                form_selector,
+                action_url: validate_path(origin, base, &action_path, schema_version)?,
+                expected_url: validate_path(origin, base, &expected_path, schema_version)?,
+                verify_selector,
+                expected_text,
+                alt_text,
+            }
+        }
+        StepAction::CheckAbsent {
+            selector,
+            expected_text,
+        } => {
+            if schema_version != 5 || phase == StepPhase::FixtureCleanup {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' check_absent is available only in v5 setup or main steps"
+                )));
+            }
+            validate_selector(&selector)?;
+            validate_expected(step_id, &expected_text)?;
+            ValidatedAction::CheckAbsent {
+                selector,
+                expected_text,
+            }
+        }
+        StepAction::EnsureAbsent {
+            status_selector,
+            expected_text,
+            button_selector,
+            form_selector,
+            action_path,
+            expected_path,
+            alt_text,
+        } => {
+            if schema_version != 5 || phase != StepPhase::FixtureCleanup {
+                return Err(JourneyError::Validation(format!(
+                    "step '{step_id}' ensure_absent is available only in v5 cleanup_steps"
+                )));
+            }
+            validate_selector(&status_selector)?;
+            validate_simple_id_selector(step_id, &button_selector)?;
+            validate_simple_id_selector(step_id, &form_selector)?;
+            validate_expected(step_id, &expected_text)?;
+            validate_alt_text(step_id, "ensure_absent", &alt_text)?;
+            ValidatedAction::EnsureAbsent {
+                status_selector,
+                expected_text,
+                button_selector,
+                form_selector,
+                action_url: validate_path(origin, base, &action_path, schema_version)?,
+                expected_url: validate_path(origin, base, &expected_path, schema_version)?,
+                alt_text,
+            }
+        }
+    };
+    if phase == StepPhase::Setup && action.is_mutating() {
+        return Err(JourneyError::Validation(format!(
+            "step '{step_id}' setup may not mutate application state"
+        )));
     }
+    Ok(action)
+}
 
-    validate_authentication_steps(schema_version, document.authentication.as_ref(), &steps)?;
+fn require_v5_main(
+    schema_version: u8,
+    phase: StepPhase,
+    step_id: &str,
+    action: &str,
+) -> Result<(), JourneyError> {
+    if schema_version == 5 && phase == StepPhase::Journey {
+        Ok(())
+    } else {
+        Err(JourneyError::Validation(format!(
+            "step '{step_id}' {action} is available only in journey v5 main steps"
+        )))
+    }
+}
 
-    Ok(ValidatedJourney {
-        schema_version,
-        source_path: loaded.source_path,
-        source_sha256: loaded.source_sha256,
-        meta: document.journey,
-        origin,
-        authentication: document.authentication,
-        evidence: document.evidence,
-        steps,
-    })
+fn validate_expected(step_id: &str, value: &str) -> Result<(), JourneyError> {
+    validate_nonempty("expected text", value)?;
+    if value.len() > MAX_EXPECTED_BYTES || has_disallowed_control(value) {
+        return Err(JourneyError::Validation(format!(
+            "step '{step_id}' expected text exceeds {MAX_EXPECTED_BYTES} bytes or contains unsupported controls"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_simple_id_selector(step_id: &str, value: &str) -> Result<(), JourneyError> {
+    let identifier = value.strip_prefix('#').unwrap_or_default();
+    if identifier.is_empty()
+        || identifier.len() > 96
+        || !identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(JourneyError::Validation(format!(
+            "step '{step_id}' mutation selector must be one simple #id selector"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_authentication_fields(
     schema_version: u8,
     authentication: Option<&AuthRequirement>,
 ) -> Result<(), JourneyError> {
-    if schema_version == 4 && authentication.is_none() {
-        return Err(JourneyError::Validation(
-            "journey schema version 4 requires an authentication contract".to_owned(),
-        ));
+    if matches!(schema_version, 4 | 5) && authentication.is_none() {
+        return Err(JourneyError::Validation(format!(
+            "journey schema version {schema_version} requires an authentication contract"
+        )));
     }
     let Some(authentication) = authentication else {
         return Ok(());
     };
-    if schema_version == 4 {
+    if matches!(schema_version, 4 | 5) {
         validate_auth_identifier("authentication provider", &authentication.provider)?;
         validate_auth_identifier("authentication role", &authentication.role)?;
     } else {
@@ -502,10 +976,18 @@ fn validate_authentication_fields(
         validate_nonempty("authentication role", &authentication.role)?;
     }
     match (schema_version, authentication.verification_step.as_deref()) {
-        (4, Some(step)) => validate_auth_identifier("authentication verification_step", step),
-        (4, None) => Err(JourneyError::Validation(
-            "journey schema version 4 requires authentication verification_step".to_owned(),
-        )),
+        (4 | 5, Some(step)) => {
+            validate_auth_identifier("authentication verification_step", step)?;
+            if schema_version == 5 && authentication.disposable_actor != Some(true) {
+                return Err(JourneyError::Validation(
+                    "journey schema version 5 requires disposable_actor = true".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        (4 | 5, None) => Err(JourneyError::Validation(format!(
+            "journey schema version {schema_version} requires authentication verification_step"
+        ))),
         (_, Some(_)) => Err(JourneyError::Validation(
             "authentication verification_step requires journey schema version 4".to_owned(),
         )),
@@ -518,7 +1000,7 @@ fn validate_authentication_steps(
     authentication: Option<&AuthRequirement>,
     steps: &[ValidatedStep],
 ) -> Result<(), JourneyError> {
-    if schema_version != 4 {
+    if !matches!(schema_version, 4 | 5) {
         return Ok(());
     }
     let verification_step = authentication
@@ -539,6 +1021,18 @@ fn validate_authentication_steps(
         return Err(JourneyError::Validation(
             "authentication verification_step must reference a check_text step".to_owned(),
         ));
+    }
+    if schema_version == 5 {
+        let setup_count = steps
+            .iter()
+            .position(|step| step.action.is_mutating())
+            .unwrap_or(steps.len());
+        if verification_index >= setup_count {
+            return Err(JourneyError::Validation(
+                "mutation authentication verification must pass before any mutating step"
+                    .to_owned(),
+            ));
+        }
     }
     if steps[verification_index].guide_instruction.is_some()
         || steps
@@ -759,6 +1253,13 @@ action = { type = "capture", selector = "h1", alt_text = "Highlighted heading" }
             Origin::parse("http://example.com").unwrap(),
             Origin::parse("https://example.com").unwrap()
         );
+        let ipv6 = Origin::parse("http://[::1]:4173").unwrap();
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.to_string(), "http://[::1]:4173");
+        assert_eq!(ipv6.base_url().as_str(), "http://[::1]:4173/");
+        assert!(ipv6.is_literal_loopback());
+        assert!(ipv6.contains(&Url::parse("http://[::1]:4173/path").unwrap()));
+        assert!(!ipv6.contains(&Url::parse("http://[::1]:4174/path").unwrap()));
     }
 
     #[test]
@@ -923,6 +1424,7 @@ action = { type = "navigate", path = "/", unexpected = true }
                 title: "Check authentication URL".to_owned(),
                 guide_instruction: None,
                 evidence_for: Vec::new(),
+                effect: None,
                 action: StepAction::CheckUrl {
                     path: "/authenticated".to_owned(),
                 },
@@ -940,8 +1442,28 @@ action = { type = "navigate", path = "/", unexpected = true }
             provider: "Legacy Provider".to_owned(),
             role: "Read Only Viewer".to_owned(),
             verification_step: None,
+            disposable_actor: None,
         });
         assert!(validate(compatible_legacy).is_ok());
+    }
+
+    #[test]
+    fn v5_authentication_verification_must_execute_during_setup() {
+        let source = include_bytes!("../examples/mutating-pass.toml");
+        let mut document: JourneyDocument = toml::from_slice(source).unwrap();
+        let verification = document.setup_steps.remove(1);
+        document.steps.insert(0, verification);
+        let error = validate(LoadedJourney {
+            source_path: PathBuf::from("mutating-pass.toml"),
+            source_sha256: hex_digest(source),
+            document,
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("verification_step must be declared in setup_steps")
+        );
     }
 
     #[test]

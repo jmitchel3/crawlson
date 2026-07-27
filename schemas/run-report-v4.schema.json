@@ -1,0 +1,524 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/run-report-v4.schema.json",
+  "title": "Crawlson disposable mutating run report v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "crawlson_version",
+    "run_id",
+    "run_directory",
+    "journey",
+    "target_origin",
+    "action_authorization",
+    "mutation_authorization",
+    "authentication",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "duration_ms",
+    "outcome",
+    "execution_outcome",
+    "reason",
+    "execution_reason",
+    "driver",
+    "steps",
+    "artifacts",
+    "fixture",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": { "const": 4 },
+    "crawlson_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$" },
+    "run_directory": { "type": "string", "maxLength": 32768 },
+    "journey": { "$ref": "#/$defs/journey" },
+    "target_origin": { "type": "string", "pattern": "^https?://[^/?#]+:[0-9]+$" },
+    "action_authorization": { "$ref": "#/$defs/action_authorization" },
+    "mutation_authorization": { "$ref": "#/$defs/mutation_authorization" },
+    "authentication": { "$ref": "#/$defs/authentication" },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "outcome": { "$ref": "#/$defs/outcome" },
+    "execution_outcome": { "$ref": "#/$defs/outcome" },
+    "reason": { "$ref": "#/$defs/reason" },
+    "execution_reason": { "$ref": "#/$defs/reason" },
+    "driver": { "$ref": "#/$defs/driver" },
+    "steps": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/step" } },
+    "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+    "diagnostics": { "$ref": "#/$defs/diagnostics" },
+    "fixture": { "$ref": "#/$defs/fixture" },
+    "cleanup": { "$ref": "#/$defs/cleanup" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "enum": ["passed", "failed"] } }, "required": ["outcome"] },
+      "then": {
+        "required": ["diagnostics"],
+        "properties": {
+          "authentication": { "properties": { "status": { "const": "verified" } }, "required": ["status"] },
+          "fixture": { "properties": { "setup_status": { "const": "passed" } }, "required": ["setup_status"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "passed" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "execution_outcome": { "const": "passed" },
+          "reason": { "properties": { "code": { "const": "journey_passed" } }, "required": ["code"] },
+          "execution_reason": { "properties": { "code": { "const": "journey_passed" } }, "required": ["code"] },
+          "fixture": {
+            "properties": {
+              "setup_status": { "const": "passed" },
+              "mutation_attempted": { "const": true },
+              "cleanup_status": { "const": "passed" },
+              "recovery_required": { "const": false }
+            },
+            "required": ["setup_status", "mutation_attempted", "cleanup_status", "recovery_required"]
+          },
+          "cleanup": {
+            "properties": { "attempted": { "const": true }, "status": { "const": "passed" } },
+            "required": ["attempted", "status"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "execution_outcome": { "const": "failed" },
+          "reason": { "properties": { "code": { "const": "checkpoint_failed" } }, "required": ["code"] },
+          "execution_reason": { "properties": { "code": { "const": "checkpoint_failed" } }, "required": ["code"] },
+          "fixture": {
+            "properties": {
+              "setup_status": { "const": "passed" },
+              "cleanup_status": { "const": "passed" },
+              "recovery_required": { "const": false }
+            },
+            "required": ["setup_status", "cleanup_status", "recovery_required"]
+          },
+          "cleanup": {
+            "properties": { "attempted": { "const": true }, "status": { "const": "passed" } },
+            "required": ["attempted", "status"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "blocked" } }, "required": ["outcome"] },
+      "then": { "properties": { "execution_outcome": { "const": "blocked" } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "properties": { "code": { "const": "recovery_completed" } },
+            "required": ["code"]
+          }
+        },
+        "required": ["reason"]
+      },
+      "then": {
+        "required": ["diagnostics"],
+        "properties": {
+          "outcome": { "const": "blocked" },
+          "execution_outcome": { "const": "blocked" },
+          "execution_reason": {
+            "properties": { "code": { "const": "recovery_completed" } },
+            "required": ["code"]
+          },
+          "authentication": {
+            "properties": { "status": { "const": "verified" } },
+            "required": ["status"]
+          },
+          "fixture": {
+            "properties": {
+              "setup_status": { "const": "blocked" },
+              "mutation_attempted": { "const": false },
+              "cleanup_status": { "const": "passed" },
+              "recovery_required": { "const": false }
+            },
+            "required": ["setup_status", "mutation_attempted", "cleanup_status", "recovery_required"]
+          },
+          "cleanup": {
+            "properties": { "attempted": { "const": true }, "status": { "const": "passed" } },
+            "required": ["attempted", "status"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture": {
+            "properties": { "cleanup_status": { "enum": ["failed", "effect_unknown"] } },
+            "required": ["cleanup_status"]
+          }
+        },
+        "required": ["fixture"]
+      },
+      "then": {
+        "properties": {
+          "outcome": { "const": "error" },
+          "fixture": { "properties": { "recovery_required": { "const": true } }, "required": ["recovery_required"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fixture": { "properties": { "recovery_required": { "const": true } }, "required": ["recovery_required"] }
+        },
+        "required": ["fixture"]
+      },
+      "then": { "properties": { "outcome": { "enum": ["blocked", "error"] } } }
+    },
+    {
+      "if": { "properties": { "cleanup": { "properties": { "status": { "const": "failed" } }, "required": ["status"] } }, "required": ["cleanup"] },
+      "then": { "properties": { "outcome": { "const": "error" } } }
+    },
+    {
+      "if": { "properties": { "execution_reason": { "properties": { "code": { "const": "authentication_state_missing" } }, "required": ["code"] } }, "required": ["execution_reason"] },
+      "then": { "properties": { "authentication": { "properties": { "status": { "const": "missing" } }, "required": ["status"] } } }
+    },
+    {
+      "if": { "properties": { "execution_reason": { "properties": { "code": { "const": "authentication_provider_unsupported" } }, "required": ["code"] } }, "required": ["execution_reason"] },
+      "then": { "properties": { "authentication": { "properties": { "status": { "const": "unsupported" } }, "required": ["status"] } } }
+    },
+    {
+      "if": { "properties": { "execution_reason": { "properties": { "code": { "const": "authentication_state_invalid" } }, "required": ["code"] } }, "required": ["execution_reason"] },
+      "then": { "properties": { "authentication": { "properties": { "status": { "const": "invalid" } }, "required": ["status"] } } }
+    },
+    {
+      "if": { "properties": { "execution_reason": { "properties": { "code": { "const": "authentication_state_load_failed" } }, "required": ["code"] } }, "required": ["execution_reason"] },
+      "then": { "properties": { "authentication": { "properties": { "status": { "const": "load_failed" } }, "required": ["status"] } } }
+    },
+    {
+      "if": { "properties": { "execution_reason": { "properties": { "code": { "const": "authentication_verification_failed" } }, "required": ["code"] } }, "required": ["execution_reason"] },
+      "then": { "properties": { "authentication": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] } } }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "grant": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}@[1-9][0-9]*:[a-z0-9._-]{1,96}$" },
+    "outcome": { "enum": ["passed", "failed", "blocked", "error"] },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_path", "source_sha256", "id", "revision"],
+      "properties": {
+        "source_path": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "id": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "action_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "granted", "binding_sha256"],
+      "properties": {
+        "required": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/grant" } },
+        "granted": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/grant" } },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "mutation_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "granted", "production_required", "production_granted", "binding_sha256"],
+      "properties": {
+        "required": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/grant" } },
+        "granted": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/grant" } },
+        "production_required": { "type": "boolean" },
+        "production_granted": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/grant" } },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "production_required": { "const": false } }, "required": ["production_required"] },
+          "then": { "properties": { "production_granted": { "maxItems": 0 } } }
+        }
+      ]
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "role", "verification_step", "status", "binding_sha256"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/id" },
+        "verification_step": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["missing", "unsupported", "invalid", "load_failed", "blocked", "verified"] },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "maximum_lifetime_seconds", "setup_status", "mutation_attempted", "cleanup_status", "recovery_required"],
+      "properties": {
+        "kind": { "const": "self_expiring_ui" },
+        "maximum_lifetime_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "setup_status": { "enum": ["not_started", "passed", "failed", "blocked", "error", "effect_unknown"] },
+        "mutation_attempted": { "type": "boolean" },
+        "cleanup_status": { "enum": ["not_needed", "passed", "failed", "effect_unknown"] },
+        "recovery_required": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "cleanup_status": { "const": "passed" } }, "required": ["cleanup_status"] },
+          "then": { "properties": { "recovery_required": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "cleanup_status": { "enum": ["failed", "effect_unknown"] } }, "required": ["cleanup_status"] },
+          "then": { "properties": { "recovery_required": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "mutation_attempted": { "const": true } }, "required": ["mutation_attempted"] },
+          "then": { "properties": { "setup_status": { "const": "passed" } } }
+        }
+      ]
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "commands"],
+      "properties": {
+        "name": { "const": "agent-browser" },
+        "version": { "type": "string", "pattern": "^0\\.26\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+        "session": { "type": "string", "pattern": "^[a-z0-9_-]{1,48}$" },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/driver_command" } }
+      }
+    },
+    "driver_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "capability", "duration_ms", "exit_code", "upstream_success", "stdout_bytes", "stdout_captured_bytes", "stdout_captured_sha256", "stderr_bytes", "stderr_captured_bytes", "stderr_captured_sha256"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "capability": { "enum": ["set_viewport", "authentication_load", "trace_start", "navigate", "current_url", "text", "is_visible", "is_enabled", "get_attribute", "get_count", "get_value", "fill", "exact_origin_guard", "click", "bounding_box", "screenshot", "console", "page_errors", "trace_stop", "close"] },
+        "duration_ms": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "exit_code": { "type": ["integer", "null"] },
+        "upstream_success": { "type": "boolean" },
+        "stdout_bytes": { "type": "integer", "minimum": 0 },
+        "stdout_captured_bytes": { "type": "integer", "minimum": 0 },
+        "stdout_captured_sha256": { "$ref": "#/$defs/sha256" },
+        "stderr_bytes": { "type": "integer", "minimum": 0 },
+        "stderr_captured_bytes": { "type": "integer", "minimum": 0 },
+        "stderr_captured_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "capability": { "const": "authentication_load" } }, "required": ["capability"] },
+          "then": {
+            "properties": {
+              "stdout_bytes": { "const": 0 },
+              "stdout_captured_bytes": { "const": 0 },
+              "stdout_captured_sha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+              "stderr_bytes": { "const": 0 },
+              "stderr_captured_bytes": { "const": 0 },
+              "stderr_captured_sha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "title", "phase", "effect", "kind", "status", "started_at_unix_ms", "duration_ms", "observation"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "phase": { "enum": ["setup", "journey", "fixture_cleanup"] },
+        "effect": { "enum": ["read_only", "mutating"] },
+        "kind": { "enum": ["navigate", "check_url", "check_text", "capture", "follow_link", "fill_text", "click_button", "check_absent", "ensure_absent"] },
+        "status": { "$ref": "#/$defs/outcome" },
+        "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "observation": { "$ref": "#/$defs/observation" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["fill_text", "click_button", "ensure_absent"] } }, "required": ["kind"] },
+          "then": {
+            "properties": {
+              "effect": { "const": "mutating" },
+              "observation": { "required": ["action_state", "action_grant_sha256"] }
+            },
+            "required": ["effect", "observation"]
+          },
+          "else": { "properties": { "effect": { "const": "read_only" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["fill_text", "click_button", "ensure_absent"] }, "status": { "enum": ["passed", "failed"] } }, "required": ["kind", "status"] },
+          "then": { "properties": { "observation": { "required": ["guard_command_sequence"] } } }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "setup" } }, "required": ["phase"] },
+          "then": { "properties": { "kind": { "enum": ["navigate", "check_url", "check_text", "capture", "check_absent"] }, "effect": { "const": "read_only" } } }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "fixture_cleanup" } }, "required": ["phase"] },
+          "then": { "properties": { "kind": { "enum": ["navigate", "check_url", "check_text", "capture", "ensure_absent"] } } }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["fill_text", "click_button"] } }, "required": ["kind"] },
+          "then": { "properties": { "phase": { "const": "journey" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "ensure_absent" } }, "required": ["kind"] },
+          "then": { "properties": { "phase": { "const": "fixture_cleanup" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "check_absent" } }, "required": ["kind"] },
+          "then": { "properties": { "phase": { "enum": ["setup", "journey"] } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "follow_link" } }, "required": ["kind"] },
+          "then": { "properties": { "phase": { "const": "journey" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["fill_text", "click_button"] }, "status": { "const": "passed" } }, "required": ["kind", "status"] },
+          "then": {
+            "properties": {
+              "observation": {
+                "required": ["visible", "enabled", "matched", "artifact_path", "capture_token", "box_command_sequence", "screenshot_command_sequence", "action_state", "action_grant_sha256", "action_command_sequence"],
+                "properties": { "visible": { "const": true }, "enabled": { "const": true }, "matched": { "const": true }, "action_state": { "const": "effect_verified" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "ensure_absent" }, "status": { "const": "passed" } }, "required": ["kind", "status"] },
+          "then": { "properties": { "observation": { "required": ["matched", "action_state", "action_grant_sha256"], "properties": { "matched": { "const": true }, "action_state": { "const": "effect_verified" } } } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "follow_link" }, "status": { "const": "passed" } }, "required": ["kind", "status"] },
+          "then": {
+            "properties": {
+              "observation": {
+                "required": ["visible", "enabled", "matched", "artifact_path", "capture_token", "box_command_sequence", "screenshot_command_sequence", "action_state", "action_grant_sha256", "action_command_sequence", "before_url", "target_href"],
+                "properties": { "visible": { "const": true }, "enabled": { "const": true }, "matched": { "const": true }, "action_state": { "const": "effect_verified" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "capture" }, "status": { "const": "passed" } }, "required": ["kind", "status"] },
+          "then": { "properties": { "observation": { "required": ["visible", "artifact_path", "capture_token", "box_command_sequence", "screenshot_command_sequence"], "properties": { "visible": { "const": true } } } } }
+        },
+        {
+          "if": { "properties": { "observation": { "properties": { "action_state": { "const": "effect_unknown" } }, "required": ["action_state"] } }, "required": ["observation"] },
+          "then": { "properties": { "status": { "const": "error" } } }
+        },
+        {
+          "if": { "properties": { "observation": { "properties": { "action_state": { "const": "effect_unverified" } }, "required": ["action_state"] } }, "required": ["observation"] },
+          "then": { "properties": { "status": { "const": "failed" } } }
+        }
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_url": { "type": "string" },
+        "observed_url": { "type": "string" },
+        "matched": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "observed_text_sha256": { "$ref": "#/$defs/sha256" },
+        "artifact_path": { "type": "string", "minLength": 1 },
+        "target_box_css": { "$ref": "#/$defs/css_box" },
+        "viewport": { "$ref": "#/$defs/viewport" },
+        "capture_token": { "type": "string", "minLength": 1 },
+        "box_command_sequence": { "type": "integer", "minimum": 1 },
+        "screenshot_command_sequence": { "type": "integer", "minimum": 1 },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "action_state": { "enum": ["not_attempted", "driver_acknowledged", "effect_verified", "effect_unverified", "effect_unknown"] },
+        "action_grant_sha256": { "$ref": "#/$defs/sha256" },
+        "guard_command_sequence": { "type": "integer", "minimum": 1 },
+        "action_command_sequence": { "type": "integer", "minimum": 1 },
+        "before_url": { "type": "string" },
+        "target_href": { "type": "string" }
+      }
+    },
+    "css_box": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" }, "y": { "type": "number" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width_css", "height_css", "device_scale_factor", "scroll_x_css", "scroll_y_css"],
+      "properties": {
+        "width_css": { "type": "number", "exclusiveMinimum": 0 },
+        "height_css": { "type": "number", "exclusiveMinimum": 0 },
+        "device_scale_factor": { "type": "number", "exclusiveMinimum": 0 },
+        "scroll_x_css": { "type": ["number", "null"] },
+        "scroll_y_css": { "type": ["number", "null"] }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "size_bytes", "media_type", "sha256"],
+      "properties": {
+        "kind": { "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata", "trace"] },
+        "path": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "media_type": { "enum": ["image/png", "application/json"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "step_id": { "$ref": "#/$defs/id" },
+        "source_artifact": { "type": "string", "minLength": 1 }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["console_messages", "console_sha256", "page_errors", "page_errors_sha256"],
+      "properties": {
+        "console_messages": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "console_sha256": { "$ref": "#/$defs/sha256" },
+        "page_errors": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "page_errors_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "status"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "status": { "enum": ["not_needed", "passed", "failed"] },
+        "error": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "not_needed" } }, "required": ["status"] }, "then": { "properties": { "attempted": { "const": false } }, "not": { "required": ["error"] } } },
+        { "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] }, "then": { "properties": { "attempted": { "const": true } }, "not": { "required": ["error"] } } },
+        { "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] }, "then": { "properties": { "attempted": { "const": true } }, "required": ["error"] } }
+      ]
+    }
+  }
+}

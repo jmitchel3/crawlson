@@ -144,12 +144,20 @@ fn package_impl(
         "demo-pass.toml",
         "follow-link-fail.toml",
         "follow-link-pass.toml",
+        "mutating-pass.toml",
     ] {
         let source = options.source_dir.join("examples").join(name);
         insert_source(&mut files, format!("examples/{name}"), &source, 0o644)?;
     }
     let source = options.source_dir.join("scripts/demo.sh");
     insert_source(&mut files, "scripts/demo.sh".to_owned(), &source, 0o755)?;
+    let source = options.source_dir.join("schemas/journey-v5.schema.json");
+    insert_source(
+        &mut files,
+        "schemas/journey-v5.schema.json".to_owned(),
+        &source,
+        0o644,
+    )?;
     files.insert(
         "README.md".to_owned(),
         ArchiveFile {
@@ -1359,6 +1367,8 @@ mod tests {
             assert!(members.contains_key("examples/authenticated-pass.toml"));
             assert!(members.contains_key("examples/follow-link-pass.toml"));
             assert!(members.contains_key("examples/follow-link-fail.toml"));
+            assert!(members.contains_key("examples/mutating-pass.toml"));
+            assert!(members.contains_key("schemas/journey-v5.schema.json"));
             assert!(members.contains_key("scripts/demo.sh"));
         }
     }
@@ -1619,6 +1629,7 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(source.join("examples")).unwrap();
         fs::create_dir_all(source.join("scripts")).unwrap();
+        fs::create_dir_all(source.join("schemas")).unwrap();
         let suffix = executable_suffix(target).unwrap();
         for name in ["crawlson", "clson", "crawlson-demo"] {
             fs::write(
@@ -1642,6 +1653,16 @@ mod tests {
         fs::write(
             source.join("examples/follow-link-fail.toml"),
             b"pass_action = false\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("examples/mutating-pass.toml"),
+            b"mutation = true\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("schemas/journey-v5.schema.json"),
+            b"{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}\n",
         )
         .unwrap();
         fs::write(

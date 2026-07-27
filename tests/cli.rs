@@ -53,6 +53,32 @@ fn invalid_arguments_use_the_stable_usage_exit() {
 }
 
 #[test]
+fn run_help_documents_mutation_and_v5_authentication_contracts_for_both_names() {
+    for name in ["crawlson", "clson"] {
+        let output = command_output(name, &["run", "--help"]);
+        assert!(output.status.success(), "{name}");
+        assert!(output.stderr.is_empty(), "{name}");
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            help.contains("explicit target, action, and mutation authorization"),
+            "{name}: {help}"
+        );
+        assert!(
+            help.contains("journey v4 or v5 authentication contract"),
+            "{name}: {help}"
+        );
+        for option in [
+            "--allow-mutation",
+            "--allow-production-mutation",
+            "--auth-state",
+            "--browser-executable",
+        ] {
+            assert!(help.contains(option), "{name} omitted {option}: {help}");
+        }
+    }
+}
+
+#[test]
 fn doctor_accepts_the_supported_agent_browser_range() {
     let fixture = FakeAgentBrowser::compile();
     let output = Command::new(cargo_bin("crawlson"))

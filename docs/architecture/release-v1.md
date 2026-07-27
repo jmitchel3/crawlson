@@ -1,7 +1,7 @@
 # Release and managed-install contract v1
 
-Status: defined for Crawlson 0.8.0. The repository can exercise this contract
-with non-publishing dry-run artifacts, but no public 0.8.0 release exists yet.
+Status: defined for Crawlson 0.9.0. The repository can exercise this contract
+with non-publishing dry-run artifacts, but no public 0.9.0 release exists yet.
 
 ## Purpose and boundaries
 
@@ -65,16 +65,21 @@ crawlson-vVERSION-TARGET/
     authenticated-pass.toml
     follow-link-pass.toml
     follow-link-fail.toml
+    mutating-pass.toml
+  schemas/
+    journey-v5.schema.json
   scripts/
     demo.sh
 ```
 
 The three binaries are built for the archive target. The examples and script
-are the self-contained, loopback-only demonstration; authenticated coverage
-creates disposable per-run exact-origin browser storage outside retained output
-and uses no third-party credentials. They contain no private application
-fixtures or identifiers. The bundle-local script can find the
-adjacent examples using the same relative layout used in a source checkout.
+are the self-contained, loopback-only demonstration; authenticated and mutating
+coverage creates disposable per-run exact-origin browser storage outside
+retained output and uses no third-party credentials. The journey-v5 schema is
+included so the mutation fixture's public input contract remains inspectable.
+These files contain no private application fixtures or identifiers. The
+bundle-local script can find the adjacent examples and schema using the same
+relative layout used in a source checkout.
 
 `crawlson-bundle.json` schema v1 contains the stable version, exact target, and
 a canonical path-sorted list of every payload file other than the manifest
@@ -86,10 +91,11 @@ and target/name mismatches are invalid.
 Packaging the same staged bytes must produce the same archive bytes. Packaging
 uses a canonical entry order, normalized timestamps, stable owner/group fields,
 and fixed file modes: `0755` for `bin/*` and `scripts/demo.sh`, and
-non-executable `0644` for manifests, the README, and examples. No checkout path, runner
-path, credential, signing key, or build cache is included. This claim is about
-deterministic packaging of an already-built stage; cross-machine bit-for-bit
-compiler reproducibility must not be claimed without a separate rebuild proof.
+non-executable `0644` for manifests, the README, examples, and schemas. No
+checkout path, runner path, credential, signing key, or build cache is included.
+This claim is about deterministic packaging of an already-built stage;
+cross-machine bit-for-bit compiler reproducibility must not be claimed without a
+separate rebuild proof.
 
 ## Signed release inventory
 
@@ -195,37 +201,48 @@ existing managed prefix.
 ## Packaged demo proof
 
 The bundle proves more than binary startup. With a supported independent
-`agent-browser 0.26.x` installation, run from the extracted bundle root:
+`agent-browser 0.26.x` installation and an extension-capable Chromium or Chrome
+for Testing runtime, run from the extracted bundle root:
 
 ```console
 scripts/demo.sh \
   --crawlson-bin "$PWD/bin/crawlson" \
   --demo-bin "$PWD/bin/crawlson-demo" \
+  --browser-executable /absolute/path/to/chromium \
   --output-dir ./crawlson-demo-output
 ```
 
 On Windows, use the corresponding `.exe` paths from a Bash environment. The two
 binary overrides are an inseparable pair, must name executable files, and skip
-the source `cargo build`. All existing target authorization and nonempty-output
-guards remain in force.
+the source `cargo build`. The browser executable must be a regular
+extension-capable Chromium or Chrome for Testing binary; when the supported
+Playwright cache contains exactly such a runtime, the script can discover it.
+All existing target authorization and nonempty-output guards remain in force.
 
 The proof requires a passing read-only observation, an intentional visible
 failure, a blocked missing-origin grant, a verified same-origin link action, an
 intentional post-action mismatch, a blocked missing-action grant, a visibly
-verified disposable authenticated session, and a blocked missing-state run. It
-verifies the run reports, trace, raw screenshot, focused screenshot, focus
-metadata, guide, and findings. The focused evidence must retain the vivid red
+verified disposable authenticated session, a blocked missing-state run, a
+successful disposable mutation with visible cleanup, a blocked missing-mutation
+grant, and a blocked missing-disposable-state mutation. It compiles the four
+successful journeys into a guide collection, compiles the deterministic
+failures into a separate findings review tree, and checks both trees without
+rewriting them. It verifies the run reports, traces, raw screenshots, focused
+screenshots, focus metadata, guides, findings, exact mutation effects, and
+cleared recovery authority. The focused evidence must retain the vivid red
 action outline and dimmed surrounding page; merely producing a PNG is not
 sufficient.
 
 ## Non-publishing dry run
 
-The release dry run builds, packages, installs, and exercises bundle HTTP
-startup on all four native targets but cannot publish. The complete packaged
-eight-outcome real-browser demo remains a required release proof and is not yet a
-cross-target dry-run gate. Its workflow and token use read-only repository
-permissions. It has no release, tag, package, attestation, deployment, or
-external-registry write step and receives no production signing secret.
+The release dry run builds, packages, installs, and runs the complete packaged
+authenticated mutation-and-guide demo through the installed `crawlson` binary
+on all four native targets. It also checks the resulting guide collection
+through the installed `clson` launcher. This complete installed demo is a
+required cross-target release gate, but the workflow cannot publish. Its token
+uses read-only repository permissions. It has no release, tag, package,
+attestation, deployment, or external-registry write step and receives no
+production signing secret.
 
 Signatures in a dry run use an explicitly test-only key whose private material
 is scoped to the bounded test job and carries no production authority.
@@ -237,10 +254,11 @@ than promote dry-run output.
 Dry-run verification must fail on a missing target, alias mismatch, raw/bundled
 payload mismatch, modified fixture, unsafe archive entry, bad digest or test
 signature, incomplete receipt, wrong-target install, partial replacement,
-rollback failure, or packaged-server startup failure. Passing the current dry
-run proves that clean managed binaries and the packaged server work; it does not
-yet prove the complete packaged browser demo or satisfy the public MVP install
-criterion.
+rollback failure, packaged-server startup failure, incomplete browser evidence,
+unverified mutation cleanup, or a stale guide collection. Passing the dry run
+proves that clean managed binaries and the complete packaged browser demo work
+on the four release targets. It does not provide production authenticity or
+authorize a public release.
 
 ## Owner-gated production follow-up
 

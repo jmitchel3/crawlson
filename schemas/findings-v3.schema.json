@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/findings-v3.schema.json",
+  "title": "Crawlson disposable mutation findings v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "journey", "findings"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$" },
+    "journey": { "$ref": "#/$defs/journey" },
+    "findings": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/finding" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "type": "string", "pattern": "^/(?!/)[^?#]*$" },
+    "selector": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "source_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "severity_source", "kind", "symptom", "step", "checkpoint", "reproduction_steps", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^finding-[0-9]{3}-[a-z0-9._-]{1,96}$" },
+        "severity": { "const": "untriaged" },
+        "severity_source": { "const": "not_assessed" },
+        "kind": {
+          "enum": [
+            "url_mismatch", "target_not_visible", "text_mismatch",
+            "link_not_visible", "link_not_enabled", "link_target_invalid",
+            "link_destination_mismatch", "link_postcondition_mismatch",
+            "mutation_input_not_visible", "mutation_input_not_enabled",
+            "mutation_input_unverified", "mutation_button_not_visible",
+            "mutation_button_not_enabled", "mutation_postcondition_mismatch",
+            "fixture_not_absent"
+          ]
+        },
+        "symptom": { "type": "string", "minLength": 1 },
+        "step": { "$ref": "#/$defs/finding_step" },
+        "checkpoint": { "$ref": "#/$defs/checkpoint" },
+        "reproduction_steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/reproduction_step" } },
+        "evidence": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/evidence" },
+          "allOf": [
+            {
+              "contains": { "properties": { "kind": { "const": "run_report" } }, "required": ["kind"] },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": { "properties": { "kind": { "const": "trace" } }, "required": ["kind"] },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "if": { "contains": { "properties": { "kind": { "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata"] } }, "required": ["kind"] } },
+              "then": {
+                "allOf": [
+                  { "contains": { "properties": { "kind": { "const": "raw_screenshot" } }, "required": ["kind"] } },
+                  { "contains": { "properties": { "kind": { "const": "focused_screenshot" } }, "required": ["kind"] } },
+                  { "contains": { "properties": { "kind": { "const": "focus_metadata" } }, "required": ["kind"] } }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            { "properties": { "kind": { "const": "url_mismatch" }, "checkpoint": { "$ref": "#/$defs/url_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "target_not_visible" }, "checkpoint": { "$ref": "#/$defs/target_not_visible_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "text_mismatch" }, "checkpoint": { "$ref": "#/$defs/text_mismatch_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "link_not_visible" }, "checkpoint": { "$ref": "#/$defs/link_not_visible_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "link_not_enabled" }, "checkpoint": { "$ref": "#/$defs/link_not_enabled_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "link_target_invalid" }, "checkpoint": { "$ref": "#/$defs/link_target_invalid_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "link_destination_mismatch" }, "checkpoint": { "$ref": "#/$defs/link_destination_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "link_postcondition_mismatch" }, "checkpoint": { "$ref": "#/$defs/link_postcondition_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_input_not_visible" }, "checkpoint": { "$ref": "#/$defs/mutation_input_not_visible_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_input_not_enabled" }, "checkpoint": { "$ref": "#/$defs/mutation_input_not_enabled_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_input_unverified" }, "checkpoint": { "$ref": "#/$defs/mutation_input_unverified_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_button_not_visible" }, "checkpoint": { "$ref": "#/$defs/mutation_button_not_visible_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_button_not_enabled" }, "checkpoint": { "$ref": "#/$defs/mutation_button_not_enabled_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "mutation_postcondition_mismatch" }, "checkpoint": { "$ref": "#/$defs/mutation_postcondition_checkpoint" } }, "required": ["kind", "checkpoint"] },
+            { "properties": { "kind": { "const": "fixture_not_absent" }, "checkpoint": { "$ref": "#/$defs/fixture_not_absent_checkpoint" } }, "required": ["kind", "checkpoint"] }
+          ]
+        }
+      ]
+    },
+    "finding_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "title"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected"],
+      "properties": {
+        "expected": { "type": "string" },
+        "comparison": { "enum": ["exact", "contains"] },
+        "observed_path": { "type": "string", "minLength": 1 },
+        "visible": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "matched": { "type": "boolean" },
+        "action_state": { "enum": ["not_attempted", "driver_acknowledged", "effect_verified", "effect_unverified", "effect_unknown"] },
+        "observed_text_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "url_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        { "required": ["expected", "comparison", "observed_path", "matched"], "properties": { "expected": { "$ref": "#/$defs/path" }, "comparison": { "const": "exact" }, "observed_path": { "$ref": "#/$defs/path" }, "matched": { "const": false } }, "not": { "anyOf": [{ "required": ["visible"] }, { "required": ["enabled"] }, { "required": ["action_state"] }, { "required": ["observed_text_sha256"] }] } }
+      ]
+    },
+    "target_not_visible_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        { "required": ["expected", "comparison", "visible"], "properties": { "expected": { "type": "string", "minLength": 1 }, "visible": { "const": false } }, "not": { "anyOf": [{ "required": ["observed_path"] }, { "required": ["enabled"] }, { "required": ["matched"] }, { "required": ["action_state"] }, { "required": ["observed_text_sha256"] }] } }
+      ]
+    },
+    "text_mismatch_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        { "required": ["expected", "comparison", "visible", "matched", "observed_text_sha256"], "properties": { "expected": { "type": "string", "minLength": 1 }, "visible": { "const": true }, "matched": { "const": false } }, "not": { "anyOf": [{ "required": ["observed_path"] }, { "required": ["enabled"] }, { "required": ["action_state"] }] } }
+      ]
+    },
+    "link_base_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        { "required": ["expected", "comparison", "visible", "matched", "action_state"], "properties": { "expected": { "$ref": "#/$defs/path" }, "comparison": { "const": "exact" }, "matched": { "const": false } }, "not": { "required": ["observed_text_sha256"] } }
+      ]
+    },
+    "link_not_visible_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/link_base_checkpoint" }, { "properties": { "visible": { "const": false }, "action_state": { "const": "not_attempted" } }, "not": { "anyOf": [{ "required": ["observed_path"] }, { "required": ["enabled"] }] } }]
+    },
+    "link_not_enabled_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/link_base_checkpoint" }, { "required": ["enabled"], "properties": { "visible": { "const": true }, "enabled": { "const": false }, "action_state": { "const": "not_attempted" } }, "not": { "required": ["observed_path"] } }]
+    },
+    "link_target_invalid_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/link_base_checkpoint" }, { "required": ["enabled"], "properties": { "visible": { "const": true }, "enabled": { "const": true }, "action_state": { "const": "not_attempted" } }, "not": { "required": ["observed_path"] } }]
+    },
+    "link_destination_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/link_base_checkpoint" }, { "required": ["observed_path", "enabled"], "properties": { "observed_path": { "$ref": "#/$defs/path" }, "visible": { "const": true }, "enabled": { "const": true }, "action_state": { "const": "not_attempted" } } }]
+    },
+    "link_postcondition_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/link_base_checkpoint" }, { "required": ["observed_path", "enabled"], "properties": { "observed_path": { "$ref": "#/$defs/path" }, "visible": { "const": true }, "enabled": { "const": true }, "action_state": { "const": "driver_acknowledged" } } }]
+    },
+    "mutation_input_not_visible_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "visible", "matched", "action_state"], "properties": { "expected": { "const": "generated public fixture token" }, "comparison": { "const": "exact" }, "visible": { "const": false }, "matched": { "const": false }, "action_state": { "const": "not_attempted" } }, "not": { "anyOf": [{ "required": ["enabled"] }, { "required": ["observed_text_sha256"] }] } }]
+    },
+    "mutation_input_not_enabled_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "visible", "enabled", "matched", "action_state"], "properties": { "expected": { "const": "generated public fixture token" }, "comparison": { "const": "exact" }, "visible": { "const": true }, "enabled": { "const": false }, "matched": { "const": false }, "action_state": { "const": "not_attempted" } }, "not": { "required": ["observed_text_sha256"] } }]
+    },
+    "mutation_input_unverified_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "matched", "action_state"], "properties": { "expected": { "const": "generated public fixture token" }, "comparison": { "const": "exact" }, "matched": { "const": false }, "action_state": { "enum": ["not_attempted", "effect_unverified"] } } }]
+    },
+    "mutation_button_not_visible_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "visible", "matched", "action_state"], "properties": { "expected": { "$ref": "#/$defs/path" }, "comparison": { "const": "exact" }, "visible": { "const": false }, "matched": { "const": false }, "action_state": { "enum": ["not_attempted", "effect_unverified"] } } }]
+    },
+    "mutation_button_not_enabled_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "visible", "enabled", "matched", "action_state"], "properties": { "expected": { "$ref": "#/$defs/path" }, "comparison": { "const": "exact" }, "visible": { "const": true }, "enabled": { "const": false }, "matched": { "const": false }, "action_state": { "const": "not_attempted" } } }]
+    },
+    "mutation_postcondition_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "matched", "action_state"], "properties": { "expected": { "$ref": "#/$defs/path" }, "comparison": { "const": "exact" }, "matched": { "const": false }, "action_state": { "enum": ["not_attempted", "effect_unverified"] } } }]
+    },
+    "fixture_not_absent_checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/checkpoint" }, { "required": ["expected", "comparison", "visible", "matched"], "properties": { "expected": { "type": "string", "minLength": 1 }, "comparison": { "const": "exact" }, "matched": { "const": false } }, "not": { "anyOf": [{ "required": ["enabled"] }, { "required": ["action_state"] }, { "required": ["observed_path"] }] } }]
+    },
+    "reproduction_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "title", "kind", "status", "action"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["navigate", "check_url", "check_text", "capture", "follow_link", "fill_text", "click_button", "check_absent", "ensure_absent"] },
+        "status": { "enum": ["passed", "failed"] },
+        "action": { "$ref": "#/$defs/action" }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            { "properties": { "kind": { "const": "navigate" }, "action": { "properties": { "type": { "const": "navigate" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "check_url" }, "action": { "properties": { "type": { "const": "check_url" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "check_text" }, "action": { "properties": { "type": { "const": "check_text" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "capture" }, "action": { "properties": { "type": { "const": "capture" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "follow_link" }, "action": { "properties": { "type": { "const": "follow_link" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "fill_text" }, "action": { "properties": { "type": { "const": "fill_text" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "click_button" }, "action": { "properties": { "type": { "const": "click_button" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "check_absent" }, "action": { "properties": { "type": { "const": "check_absent" } }, "required": ["type"] } } },
+            { "properties": { "kind": { "const": "ensure_absent" }, "action": { "properties": { "type": { "const": "ensure_absent" } }, "required": ["type"] } } }
+          ]
+        }
+      ]
+    },
+    "action": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "path"], "properties": { "type": { "const": "navigate" }, "path": { "$ref": "#/$defs/path" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "path"], "properties": { "type": { "const": "check_url" }, "path": { "$ref": "#/$defs/path" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "expected", "comparison"], "properties": { "type": { "const": "check_text" }, "selector": { "$ref": "#/$defs/selector" }, "expected": { "type": "string", "minLength": 1, "maxLength": 65536 }, "comparison": { "enum": ["exact", "contains"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector"], "properties": { "type": { "const": "capture" }, "selector": { "$ref": "#/$defs/selector" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "expected_path"], "properties": { "type": { "const": "follow_link" }, "selector": { "$ref": "#/$defs/selector" }, "expected_path": { "$ref": "#/$defs/path" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "value_source"], "properties": { "type": { "const": "fill_text" }, "selector": { "$ref": "#/$defs/selector" }, "value_source": { "const": "generated_public_fixture_token" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "expected_path"], "properties": { "type": { "const": "click_button" }, "selector": { "$ref": "#/$defs/selector" }, "expected_path": { "$ref": "#/$defs/path" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "expected"], "properties": { "type": { "const": "check_absent" }, "selector": { "$ref": "#/$defs/selector" }, "expected": { "type": "string", "minLength": 1, "maxLength": 65536 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "selector", "expected_path"], "properties": { "type": { "const": "ensure_absent" }, "selector": { "$ref": "#/$defs/selector" }, "expected_path": { "$ref": "#/$defs/path" } } }
+      ]
+    },
+    "evidence": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "path", "sha256"], "properties": { "kind": { "const": "run_report" }, "path": { "const": "report.json" }, "sha256": { "$ref": "#/$defs/sha256" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "path", "sha256"], "properties": { "kind": { "const": "trace" }, "path": { "const": "evidence/trace.json" }, "sha256": { "$ref": "#/$defs/sha256" } } },
+        { "$ref": "#/$defs/raw_screenshot_evidence" },
+        { "$ref": "#/$defs/focused_screenshot_evidence" },
+        { "$ref": "#/$defs/focus_metadata_evidence" }
+      ]
+    },
+    "raw_screenshot_evidence": {
+      "allOf": [{ "$ref": "#/$defs/associated_evidence" }, { "properties": { "kind": { "const": "raw_screenshot" }, "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.raw\\.png$" } } }]
+    },
+    "focused_screenshot_evidence": {
+      "allOf": [{ "$ref": "#/$defs/associated_evidence" }, { "properties": { "kind": { "const": "focused_screenshot" }, "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.focused\\.png$" } } }]
+    },
+    "focus_metadata_evidence": {
+      "allOf": [{ "$ref": "#/$defs/associated_evidence" }, { "properties": { "kind": { "const": "focus_metadata" }, "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.focused\\.json$" } } }]
+    },
+    "associated_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256", "capture_step_id", "association_source"],
+      "properties": {
+        "kind": { "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "capture_step_id": { "$ref": "#/$defs/id" },
+        "association_source": { "enum": ["journey.evidence_for", "action.preflight"] }
+      }
+    }
+  }
+}
