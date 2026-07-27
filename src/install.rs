@@ -534,7 +534,10 @@ fn stage_target(
         )));
     }
     make_executable(&staged)?;
-    File::open(&staged)
+    File::options()
+        .read(true)
+        .write(true)
+        .open(&staged)
         .and_then(|file| file.sync_all())
         .map_err(|error| InstallFailure::error(format!("could not sync staged binary: {error}")))?;
     let backup = transaction.join(format!("backup-{}", file_name.to_string_lossy()));
