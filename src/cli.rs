@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::doctor::{self, DoctorOptions};
+use crate::runner::{self, RunOptions};
 use crate::update::{self, ManualUpgradeOptions};
 use crate::{CommandResult, VERSION};
 
@@ -35,6 +36,9 @@ enum Commands {
     /// Check for or install a Crawlson release.
     Upgrade(UpgradeArgs),
 
+    /// Run one validated, explicitly authorized read-only journey.
+    Run(RunArgs),
+
     /// Internal isolated worker for periodic update checks.
     #[command(name = "__update-worker", hide = true)]
     UpdateWorker,
@@ -56,6 +60,43 @@ struct UpgradeArgs {
     /// Perform no network access.
     #[arg(long)]
     offline: bool,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    /// TOML journey definition to validate and run.
+    #[arg(value_name = "JOURNEY")]
+    journey: PathBuf,
+
+    /// Exact HTTP(S) origin authorized for this run.
+    #[arg(long, value_name = "ORIGIN")]
+    allow_origin: Option<String>,
+
+    /// Parent directory beneath which a unique run directory is created.
+    #[arg(long, value_name = "DIRECTORY", default_value = "crawlson-runs")]
+    output_dir: PathBuf,
+
+    /// Exact agent-browser executable to use instead of searching PATH.
+    #[arg(long, value_name = "PATH")]
+    agent_browser: Option<PathBuf>,
+
+    /// Per-command driver deadline; must remain below agent-browser's IPC limit.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u64).range(1..=29)
+    )]
+    action_timeout_seconds: u64,
+
+    /// Overall execution deadline before bounded evidence cleanup begins.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(30..=3600)
+    )]
+    run_timeout_seconds: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,6 +144,19 @@ where
             offline: args.offline,
             json: cli.json,
         }),
+        Commands::Run(args) => {
+            let report = runner::run(RunOptions {
+                journey_path: args.journey,
+                allowed_origin: args.allow_origin,
+                output_directory: args.output_dir,
+                agent_browser: args.agent_browser,
+                action_timeout: std::time::Duration::from_secs(args.action_timeout_seconds),
+                run_timeout: std::time::Duration::from_secs(args.run_timeout_seconds),
+            });
+            let mut rendered = report.render(cli.json);
+            update::finish_foreground(&mut rendered, !cli.json);
+            rendered
+        }
         Commands::UpdateWorker => update::run_periodic_worker(),
     }
 }

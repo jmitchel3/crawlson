@@ -91,6 +91,13 @@ The core owns a versioned, driver-neutral request and response model. The
 7. Preserve action request, structured response, timing, exit status, and
    redacted diagnostic metadata in execution order.
 
+Implementation status in 0.2: per-command and overall run deadlines, bounded
+evidence/cleanup commands, explicit owned-session close, and a daemon idle
+reaper are implemented and contract-tested. Graceful operating-system signal
+handling is deliberately still open; a forced termination may prevent the
+final report from being written, while the daemon reaper still bounds orphaned
+session lifetime. `TODO.md` keeps that limitation visible.
+
 The adapter exposes capabilities rather than upstream commands: navigate,
 observe, locate, act, capture, start/stop tracing, inspect diagnostics, and
 close. Unsupported capabilities are reported explicitly.

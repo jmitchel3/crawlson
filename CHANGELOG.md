@@ -6,6 +6,30 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-27
+
+### Added
+
+- Strict, versioned TOML journey and JSON report contracts for deterministic
+  read-only browser sessions.
+- `crawlson run JOURNEY` and equivalent `clson run` with explicit exact-origin
+  authorization and stable passed/failed/blocked/error exits.
+- Replaceable `agent-browser 0.26.x` process adapter with owned sessions,
+  default-deny action policy, bounded structured output, action deadlines,
+  an overall run deadline, daemon reaping, trace finalization, diagnostics
+  summaries, and visible cleanup.
+- Run directories containing ordered step evidence, provenance, artifact
+  digests, raw viewport screenshots, and browser traces.
+- Deterministic offline focused screenshots with a vivid red target outline,
+  translucent near-black surrounding mask, preserved raw PNG, and reproducible
+  sidecar metadata.
+- Fake-process, schema, renderer, and real agent-browser loopback coverage for
+  pass, deterministic failure, visibility, missing authorization/authentication,
+  cross-origin responses, malformed/contradictory/oversized protocol output,
+  evidence faults, timeouts, cleanup failure, and focused-image rendering.
+
+## [0.1.0] - 2026-07-27
+
 ### Added
 
 - Rust CLI foundation at version 0.1.0.
