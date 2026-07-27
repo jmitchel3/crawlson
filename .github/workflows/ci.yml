@@ -160,7 +160,11 @@ jobs:
           [[ -n "$CRAWLSON_BUNDLE_ROOT" ]]
           echo "CRAWLSON_REAL_CLI_BIN=$CRAWLSON_BUNDLE_ROOT/bin/crawlson" >> "$GITHUB_ENV"
           echo "CRAWLSON_REAL_DEMO_BIN=$CRAWLSON_BUNDLE_ROOT/bin/crawlson-demo" >> "$GITHUB_ENV"
-          "$CRAWLSON_BUNDLE_ROOT/scripts/demo.sh" \
+          # agent-browser keeps extension-bearing sessions headed so their
+          # content scripts run. The Linux runner therefore needs a display.
+          command -v xvfb-run >/dev/null
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+            "$CRAWLSON_BUNDLE_ROOT/scripts/demo.sh" \
             --crawlson-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson" \
             --demo-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson-demo" \
             --agent-browser "$AGENT_BROWSER_REAL_BIN" \
@@ -173,8 +177,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          cargo test --test real_agent_browser --locked -- --ignored --nocapture \
-            2>&1 | tee ci-artifacts/real-browser-test.log
+          # The integration reaches an extension-bearing mutating journey.
+          command -v xvfb-run >/dev/null
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" \
+            cargo test --test real_agent_browser --locked -- --ignored --nocapture \
+              2>&1 | tee ci-artifacts/real-browser-test.log
       - name: Upload real-browser evidence and logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

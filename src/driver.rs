@@ -966,6 +966,12 @@ fn add_safe_environment(command: &mut Command, timeout: Duration) {
         "APPDATA",
         "XDG_RUNTIME_DIR",
         "XDG_CACHE_HOME",
+        // agent-browser 0.26 launches headed Chrome when an extension is
+        // configured. Preserve only the X11 connection values supplied by
+        // the caller so that extension-backed runs can use an isolated Xvfb
+        // display without forwarding the rest of the ambient environment.
+        "DISPLAY",
+        "XAUTHORITY",
     ];
     for key in SAFE {
         if let Some(value) = env::var_os(key) {

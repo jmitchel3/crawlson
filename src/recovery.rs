@@ -31,6 +31,8 @@ pub const RECOVERY_DIRECTORY: &str = ".crawlson-recovery";
 pub const RUN_RECOVERY_FILE: &str = "recovery-required.json";
 
 const MAX_RECOVERY_BYTES: u64 = 64 * 1024;
+#[cfg(windows)]
+const RECOVERY_LOCK_OFFSET: u64 = MAX_RECOVERY_BYTES + 1;
 const MAX_CLEANUP_STEPS: usize = 256;
 const MAX_ID_BYTES: usize = 96;
 const MAX_RUN_ID_BYTES: usize = 128;
@@ -381,7 +383,7 @@ pub struct ActiveRecovery {
     journal_sha256: String,
     /// Holds an operating-system exclusive lock on the origin authority for
     /// the complete main/cleanup or recovery-only lifetime.
-    recovery_lock: fs::File,
+    recovery_lock: RecoveryLock,
 }
 
 impl ActiveRecovery {
@@ -431,7 +433,18 @@ impl ActiveRecovery {
     }
 }
 
-fn lock_journal(path: &Path) -> Result<fs::File, RecoveryError> {
+#[derive(Debug)]
+struct RecoveryLock {
+    file: fs::File,
+}
+
+impl Drop for RecoveryLock {
+    fn drop(&mut self) {
+        unlock_recovery(&self.file);
+    }
+}
+
+fn lock_journal(path: &Path) -> Result<RecoveryLock, RecoveryError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| RecoveryError::InvalidJournal)?;
     validate_file_metadata(&metadata).map_err(|_| RecoveryError::InvalidJournal)?;
     let mut options = OpenOptions::new();
@@ -448,11 +461,82 @@ fn lock_journal(path: &Path) -> Result<fs::File, RecoveryError> {
     {
         return Err(RecoveryError::InvalidJournal);
     }
-    match file.try_lock() {
-        Ok(()) => Ok(file),
+    match try_lock_recovery(&file) {
+        Ok(()) => Ok(RecoveryLock { file }),
         Err(fs::TryLockError::WouldBlock) => Err(RecoveryError::Pending),
         Err(fs::TryLockError::Error(_)) => Err(RecoveryError::InvalidJournal),
     }
+}
+
+#[cfg(not(windows))]
+fn try_lock_recovery(file: &fs::File) -> Result<(), fs::TryLockError> {
+    file.try_lock()
+}
+
+#[cfg(not(windows))]
+fn unlock_recovery(file: &fs::File) {
+    let _ = file.unlock();
+}
+
+#[cfg(windows)]
+fn try_lock_recovery(file: &fs::File) -> Result<(), fs::TryLockError> {
+    use std::os::windows::io::AsRawHandle;
+
+    let offset_low = RECOVERY_LOCK_OFFSET as u32;
+    let offset_high = (RECOVERY_LOCK_OFFSET >> 32) as u32;
+    // SAFETY: the handle belongs to a live `File`. LockFile does not retain
+    // any pointers, and the requested one-byte range is beyond every valid
+    // recovery journal, so bounded readers never overlap the mandatory lock.
+    let succeeded =
+        unsafe { windows_lock_file(file.as_raw_handle().cast(), offset_low, offset_high, 1, 0) };
+    if succeeded != 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    match error.raw_os_error() {
+        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION) => {
+            Err(fs::TryLockError::WouldBlock)
+        }
+        _ => Err(fs::TryLockError::Error(error)),
+    }
+}
+
+#[cfg(windows)]
+fn unlock_recovery(file: &fs::File) {
+    use std::os::windows::io::AsRawHandle;
+
+    let offset_low = RECOVERY_LOCK_OFFSET as u32;
+    let offset_high = (RECOVERY_LOCK_OFFSET >> 32) as u32;
+    // SAFETY: this uses the same live handle and exact range passed to
+    // LockFile. Failure is still followed by closing the handle, which makes
+    // the operating system release its locks conservatively.
+    unsafe {
+        windows_unlock_file(file.as_raw_handle().cast(), offset_low, offset_high, 1, 0);
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "LockFile"]
+    fn windows_lock_file(
+        file: *mut std::ffi::c_void,
+        offset_low: u32,
+        offset_high: u32,
+        length_low: u32,
+        length_high: u32,
+    ) -> i32;
+    #[link_name = "UnlockFile"]
+    fn windows_unlock_file(
+        file: *mut std::ffi::c_void,
+        offset_low: u32,
+        offset_high: u32,
+        length_low: u32,
+        length_high: u32,
+    ) -> i32;
 }
 
 #[derive(Debug, Deserialize, Serialize)]
