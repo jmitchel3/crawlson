@@ -27,6 +27,7 @@ const CHECK_SUCCESS_INTERVAL: u64 = 7 * 24 * 60 * 60;
 const CHECK_FAILURE_INTERVAL: u64 = 24 * 60 * 60;
 const SUCCESS_JITTER_MAX: u64 = 48 * 60 * 60;
 const FAILURE_JITTER_MAX: u64 = 6 * 60 * 60;
+const RAW_SELF_REPLACEMENT_SUPPORTED: bool = cfg!(unix);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ManualUpgradeOptions {
@@ -308,7 +309,14 @@ impl UpdateBackend for GithubSignedBackend {
 
 pub fn run_manual(options: ManualUpgradeOptions) -> CommandResult {
     let backend = GithubSignedBackend::new();
-    run_manual_with_backend_lock(options, &backend, installation_ownership(), true, true)
+    run_manual_with_backend_lock(
+        options,
+        &backend,
+        installation_ownership(),
+        true,
+        true,
+        RAW_SELF_REPLACEMENT_SUPPORTED,
+    )
 }
 
 #[cfg(test)]
@@ -317,7 +325,24 @@ fn run_manual_with_backend(
     backend: &dyn UpdateBackend,
     ownership: InstallOwnership,
 ) -> CommandResult {
-    run_manual_with_backend_lock(options, backend, ownership, false, false)
+    run_manual_with_backend_capability(options, backend, ownership, true)
+}
+
+#[cfg(test)]
+fn run_manual_with_backend_capability(
+    options: ManualUpgradeOptions,
+    backend: &dyn UpdateBackend,
+    ownership: InstallOwnership,
+    raw_self_replacement_supported: bool,
+) -> CommandResult {
+    run_manual_with_backend_lock(
+        options,
+        backend,
+        ownership,
+        false,
+        false,
+        raw_self_replacement_supported,
+    )
 }
 
 fn run_manual_with_backend_lock(
@@ -326,6 +351,7 @@ fn run_manual_with_backend_lock(
     ownership: InstallOwnership,
     lock_replacement: bool,
     honor_environment_offline: bool,
+    raw_self_replacement_supported: bool,
 ) -> CommandResult {
     let current = Version::parse(VERSION).expect("Cargo package version is valid semver");
     if options.offline || (honor_environment_offline && env_truthy("CRAWLSON_OFFLINE")) {
@@ -444,6 +470,22 @@ fn run_manual_with_backend_lock(
             );
         }
     };
+
+    if !raw_self_replacement_supported {
+        return render_upgrade(
+            options.json,
+            1,
+            UpgradeReport {
+                schema_version: 1,
+                status: UpgradeStatus::Blocked,
+                current_version: current,
+                latest_version: Some(candidate.version),
+                release_url: Some(candidate.release_url),
+                message: "direct self-upgrade is unavailable on this platform; authenticate and extract the matching release bundle, then run its bundled 'crawlson install --from-bundle ROOT --prefix ABSOLUTE_BIN_DIRECTORY' command"
+                    .to_owned(),
+            },
+        );
+    }
 
     let _replacement_lock = if lock_replacement {
         let Some(paths) = UpdatePaths::discover() else {
@@ -603,9 +645,10 @@ pub fn finish_foreground(result: &mut CommandResult, show_notice: bool) {
 }
 
 pub fn spawn_periodic_worker_if_due() {
+    let ownership = installation_ownership();
     if !periodic_allowed(
         PeriodicContext::from_env(),
-        configured_mode(installation_ownership()),
+        effective_mode(configured_mode(ownership), RAW_SELF_REPLACEMENT_SUPPORTED),
     ) || UPDATE_PUBLIC_KEY.is_none()
     {
         return;
@@ -636,7 +679,10 @@ pub fn run_periodic_worker() -> CommandResult {
     if env::var_os("CRAWLSON_UPDATE_WORKER").is_none()
         || !periodic_allowed(
             PeriodicContext::from_env(),
-            configured_mode(installation_ownership()),
+            effective_mode(
+                configured_mode(installation_ownership()),
+                RAW_SELF_REPLACEMENT_SUPPORTED,
+            ),
         )
     {
         return CommandResult::success(String::new());
@@ -664,8 +710,39 @@ fn periodic_worker(
     let Some(_lock) = try_update_lock(paths)? else {
         return Ok(());
     };
-
     let ownership = installation_ownership();
+    periodic_worker_locked(paths, now, backend, ownership, |ownership| {
+        effective_mode(
+            configured_mode(ownership.clone()),
+            RAW_SELF_REPLACEMENT_SUPPORTED,
+        )
+    })
+}
+
+#[cfg(test)]
+fn periodic_worker_with_context(
+    paths: &UpdatePaths,
+    now: u64,
+    backend: &dyn UpdateBackend,
+    ownership: InstallOwnership,
+    mode: UpdateMode,
+) -> Result<(), UpdateError> {
+    let Some(_lock) = try_update_lock(paths)? else {
+        return Ok(());
+    };
+    periodic_worker_locked(paths, now, backend, ownership, |_| mode)
+}
+
+fn periodic_worker_locked<F>(
+    paths: &UpdatePaths,
+    now: u64,
+    backend: &dyn UpdateBackend,
+    ownership: InstallOwnership,
+    mode_for_install: F,
+) -> Result<(), UpdateError>
+where
+    F: FnOnce(&InstallOwnership) -> UpdateMode,
+{
     let install_id = match &ownership {
         InstallOwnership::Standalone(install) => Some(install.install_id.as_str()),
         InstallOwnership::PackageManager { .. } | InstallOwnership::Unknown => None,
@@ -689,7 +766,7 @@ fn periodic_worker(
             state.next_check_at = Some(now + success_delay(&state.install_id, now));
             if let Some(candidate) = candidate {
                 state.latest_seen = Some(candidate.version.clone());
-                let mode = configured_mode(ownership.clone());
+                let mode = mode_for_install(&ownership);
                 if mode == UpdateMode::Auto
                     && auto_compatible(&current, &candidate.version)
                     && validate_candidate_version(&current, &candidate.version).is_ok()
@@ -732,9 +809,10 @@ pub(crate) fn try_update_lock(paths: &UpdatePaths) -> Result<Option<fs::File>, U
 }
 
 fn cached_notice() -> Option<String> {
+    let ownership = installation_ownership();
     if !periodic_allowed(
         PeriodicContext::from_env(),
-        configured_mode(installation_ownership()),
+        effective_mode(configured_mode(ownership), RAW_SELF_REPLACEMENT_SUPPORTED),
     ) {
         return None;
     }
@@ -936,6 +1014,14 @@ fn configured_mode(ownership: InstallOwnership) -> UpdateMode {
     match ownership {
         InstallOwnership::Standalone(_) => UpdateMode::Auto,
         InstallOwnership::PackageManager { .. } | InstallOwnership::Unknown => UpdateMode::Notify,
+    }
+}
+
+fn effective_mode(mode: UpdateMode, raw_self_replacement_supported: bool) -> UpdateMode {
+    if mode == UpdateMode::Auto && !raw_self_replacement_supported {
+        UpdateMode::Notify
+    } else {
+        mode
     }
 }
 
@@ -1400,6 +1486,13 @@ mod tests {
             config_file_mode("[updates]\nmode = 'notify'"),
             UpdateMode::Notify
         );
+        assert_eq!(effective_mode(UpdateMode::Auto, true), UpdateMode::Auto);
+        assert_eq!(effective_mode(UpdateMode::Auto, false), UpdateMode::Notify);
+        assert_eq!(
+            effective_mode(UpdateMode::Notify, false),
+            UpdateMode::Notify
+        );
+        assert_eq!(effective_mode(UpdateMode::Off, false), UpdateMode::Off);
     }
 
     #[test]
@@ -1450,7 +1543,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn check_only_never_invokes_the_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.5.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: true,
@@ -1470,7 +1563,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn managed_manual_upgrade_invokes_the_injected_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.5.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1491,8 +1584,70 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
     }
 
     #[test]
+    fn managed_manual_upgrade_blocks_before_download_without_raw_replacement() {
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+        let result = run_manual_with_backend_capability(
+            ManualUpgradeOptions {
+                check_only: false,
+                offline: false,
+                json: true,
+            },
+            &backend,
+            InstallOwnership::Standalone(ManagedInstall {
+                binary: PathBuf::from("crawlson.exe"),
+                install_id: "fixture-install".to_owned(),
+            }),
+            false,
+        );
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(backend.checks.get(), 1);
+        assert_eq!(backend.installs.get(), 0);
+        let report: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(report["status"], "blocked");
+        assert_eq!(report["latest_version"], "0.5.2");
+        assert!(
+            report["release_url"]
+                .as_str()
+                .unwrap()
+                .contains("/releases/tag/")
+        );
+        assert!(
+            report["message"]
+                .as_str()
+                .unwrap()
+                .contains("release bundle")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_build_wires_manual_upgrade_to_the_no_download_policy() {
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+        let result = run_manual_with_backend_capability(
+            ManualUpgradeOptions {
+                check_only: false,
+                offline: false,
+                json: true,
+            },
+            &backend,
+            InstallOwnership::Standalone(ManagedInstall {
+                binary: PathBuf::from("crawlson.exe"),
+                install_id: "fixture-install".to_owned(),
+            }),
+            RAW_SELF_REPLACEMENT_SUPPORTED,
+        );
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(backend.checks.get(), 1);
+        assert_eq!(backend.installs.get(), 0);
+        let report: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(report["status"], "blocked");
+    }
+
+    #[test]
     fn rendered_manual_policy_rejects_downgrades_and_prereleases() {
-        for version in ["0.4.9", "0.5.1-alpha.1"] {
+        for version in ["0.4.9", "0.5.2-alpha.1"] {
             let backend = FakeBackend::new(Some(candidate(version)));
             let result = run_manual_with_backend(
                 ManualUpgradeOptions {
@@ -1531,7 +1686,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn unknown_installations_fail_closed_before_replacement() {
-        let backend = FakeBackend::new(Some(candidate("0.5.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1567,6 +1722,141 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
         periodic_worker(&paths, 1_000_001, &backend).unwrap();
         assert_eq!(backend.checks.get(), 1);
+    }
+
+    #[test]
+    fn notify_only_managed_worker_persists_candidate_without_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths {
+            config: directory.path().join("config.toml"),
+            receipt: directory.path().join("install.json"),
+            state: directory.path().join("state.json"),
+            lock: directory.path().join("state.lock"),
+        };
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+        let ownership = InstallOwnership::Standalone(ManagedInstall {
+            binary: PathBuf::from("crawlson.exe"),
+            install_id: "fixture-install".to_owned(),
+        });
+
+        periodic_worker_with_context(
+            &paths,
+            1_000_000,
+            &backend,
+            ownership,
+            effective_mode(UpdateMode::Auto, false),
+        )
+        .unwrap();
+
+        assert_eq!(backend.checks.get(), 1);
+        assert_eq!(backend.installs.get(), 0);
+        let state = read_state(&paths.state).unwrap();
+        assert_eq!(state.install_id, "fixture-install");
+        assert_eq!(state.latest_seen, Some(Version::parse("0.5.2").unwrap()));
+        assert_eq!(state.last_success_at, Some(1_000_000));
+        assert_eq!(state.failure_count, 0);
+        assert!(
+            (1_000_000 + CHECK_SUCCESS_INTERVAL
+                ..=1_000_000 + CHECK_SUCCESS_INTERVAL + SUCCESS_JITTER_MAX)
+                .contains(&state.next_check_at.unwrap())
+        );
+    }
+
+    #[test]
+    fn periodic_worker_rechecks_policy_after_the_metadata_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths {
+            config: directory.path().join("config.toml"),
+            receipt: directory.path().join("install.json"),
+            state: directory.path().join("state.json"),
+            lock: directory.path().join("state.lock"),
+        };
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+        let _lock = try_update_lock(&paths).unwrap().unwrap();
+
+        periodic_worker_locked(
+            &paths,
+            1_000_000,
+            &backend,
+            InstallOwnership::Standalone(ManagedInstall {
+                binary: PathBuf::from("crawlson"),
+                install_id: "fixture-install".to_owned(),
+            }),
+            |_| {
+                assert_eq!(backend.checks.get(), 1);
+                UpdateMode::Off
+            },
+        )
+        .unwrap();
+
+        assert_eq!(backend.installs.get(), 0);
+        let state = read_state(&paths.state).unwrap();
+        assert_eq!(state.latest_seen, Some(Version::parse("0.5.2").unwrap()));
+        assert_eq!(state.last_install_at, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_build_wires_periodic_updates_to_notify_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths {
+            config: directory.path().join("config.toml"),
+            receipt: directory.path().join("install.json"),
+            state: directory.path().join("state.json"),
+            lock: directory.path().join("state.lock"),
+        };
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+
+        periodic_worker_with_context(
+            &paths,
+            1_000_000,
+            &backend,
+            InstallOwnership::Standalone(ManagedInstall {
+                binary: PathBuf::from("crawlson.exe"),
+                install_id: "fixture-install".to_owned(),
+            }),
+            effective_mode(UpdateMode::Auto, RAW_SELF_REPLACEMENT_SUPPORTED),
+        )
+        .unwrap();
+
+        assert_eq!(backend.checks.get(), 1);
+        assert_eq!(backend.installs.get(), 0);
+        let state = read_state(&paths.state).unwrap();
+        assert_eq!(state.latest_seen, Some(Version::parse("0.5.2").unwrap()));
+        assert_eq!(state.last_success_at, Some(1_000_000));
+        assert_eq!(state.last_install_at, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_build_preserves_periodic_automatic_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths {
+            config: directory.path().join("config.toml"),
+            receipt: directory.path().join("install.json"),
+            state: directory.path().join("state.json"),
+            lock: directory.path().join("state.lock"),
+        };
+        let backend = FakeBackend::new(Some(candidate("0.5.2")));
+
+        periodic_worker_with_context(
+            &paths,
+            1_000_000,
+            &backend,
+            InstallOwnership::Standalone(ManagedInstall {
+                binary: PathBuf::from("crawlson"),
+                install_id: "fixture-install".to_owned(),
+            }),
+            effective_mode(UpdateMode::Auto, RAW_SELF_REPLACEMENT_SUPPORTED),
+        )
+        .unwrap();
+
+        assert_eq!(backend.checks.get(), 1);
+        assert_eq!(backend.installs.get(), 1);
+        let state = read_state(&paths.state).unwrap();
+        assert_eq!(state.latest_seen, Some(Version::parse("0.5.2").unwrap()));
+        assert_eq!(state.last_success_at, Some(1_000_000));
+        assert_eq!(state.last_install_at, Some(1_000_000));
     }
 
     #[test]

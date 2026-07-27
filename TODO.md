@@ -54,13 +54,14 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [x] Define the 0.5.0 four-target bundle, signed release inventory, raw-payload
+- [x] Define the 0.5.1 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
-- [x] Prove a clean managed install and packaged demo from every 0.5.0 dry-run
-      bundle without using a production key or publishing a release.
+- [x] Prove a clean managed install and packaged demo-application HTTP startup
+      from every 0.5.1 dry-run bundle without using a production key or
+      publishing a release.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
-- [ ] Publish signed, immutable 0.5.0 bundles and raw update payloads after the
+- [ ] Publish signed, immutable 0.5.1 bundles and raw update payloads after the
       license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts

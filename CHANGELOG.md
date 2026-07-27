@@ -6,6 +6,18 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-27
+
+### Fixed
+
+- Windows managed installations now treat automatic update policy as
+  notify-only, preserving the signed release notice on the normal success
+  cadence without downloading a raw executable that cannot safely replace the
+  running process.
+- Manual Windows upgrades now return a typed blocked result with the immutable
+  release URL and authenticated bundle-installer guidance before any updater
+  payload download.
+
 ## [0.5.0] - 2026-07-27
 
 ### Added
@@ -21,9 +33,10 @@ breaking product behavior increments the minor version.
 - `crawlson install --from-bundle ROOT --prefix ABSOLUTE_BIN_DIR` for validated
   first-party installation of the canonical CLI and alias, including managed
   ownership receipt and rollback while leaving the demo bundle-local.
-- Packaged-demo binary overrides and a release dry-run that tests bundles,
-  installation, update ownership, failure rollback, and the complete
-  red-box/dimmed-screenshot journey without publishing.
+- Packaged-demo binary overrides, required CI coverage for the complete
+  red-box/dimmed-screenshot journey, and a non-publishing release dry-run that
+  tests every bundle's installation, update ownership, failure rollback, and
+  demo-application HTTP startup.
 
 ### Security
 
