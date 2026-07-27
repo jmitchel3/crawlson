@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod driver;
 pub mod focus;
 pub mod journey;
+pub mod render;
 pub mod runner;
 pub mod update;
 

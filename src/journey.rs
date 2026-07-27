@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ const MAX_STEPS: usize = 256;
 const MAX_SELECTOR_BYTES: usize = 4_096;
 const MAX_EXPECTED_BYTES: usize = 65_536;
 const MAX_ALT_TEXT_BYTES: usize = 4_096;
+const MAX_GUIDE_INSTRUCTION_BYTES: usize = 16_384;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +72,8 @@ pub struct StepSpec {
     pub title: String,
     #[serde(default)]
     pub guide_instruction: Option<String>,
+    #[serde(default)]
+    pub evidence_for: Vec<String>,
     pub action: StepAction,
 }
 
@@ -125,6 +129,7 @@ pub struct ValidatedStep {
     pub id: String,
     pub title: String,
     pub guide_instruction: Option<String>,
+    pub evidence_for: Vec<String>,
     pub action: ValidatedAction,
 }
 
@@ -247,7 +252,10 @@ pub enum JourneyError {
 }
 
 pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
-    let metadata = fs::metadata(path).map_err(|error| JourneyError::Read(error.to_string()))?;
+    let file = fs::File::open(path).map_err(|error| JourneyError::Read(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| JourneyError::Read(error.to_string()))?;
     if !metadata.is_file() {
         return Err(JourneyError::Read("path is not a regular file".to_owned()));
     }
@@ -256,7 +264,15 @@ pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
             "file exceeds {MAX_JOURNEY_BYTES} bytes"
         )));
     }
-    let bytes = fs::read(path).map_err(|error| JourneyError::Read(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_JOURNEY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| JourneyError::Read(error.to_string()))?;
+    if bytes.len() as u64 > MAX_JOURNEY_BYTES {
+        return Err(JourneyError::Read(format!(
+            "file exceeds {MAX_JOURNEY_BYTES} bytes"
+        )));
+    }
     let document = toml::from_slice(&bytes)
         .map_err(|error: toml::de::Error| JourneyError::Parse(error.message().to_owned()))?;
     Ok(LoadedJourney {
@@ -268,10 +284,10 @@ pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
 
 pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError> {
     let document = loaded.document;
-    if document.schema_version != 1 {
+    let schema_version = document.schema_version;
+    if !matches!(schema_version, 1 | 2) {
         return Err(JourneyError::Validation(format!(
-            "unsupported schema_version {}; expected 1",
-            document.schema_version
+            "unsupported schema_version {schema_version}; expected 1 or 2"
         )));
     }
     validate_id("journey", &document.journey.id)?;
@@ -310,6 +326,7 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
     let mut steps = Vec::with_capacity(document.steps.len());
     let mut has_checkpoint = false;
     let mut has_capture = false;
+    let mut prior_checkpoints = HashSet::new();
     for step in document.steps {
         validate_id("step", &step.id)?;
         if !identifiers.insert(step.id.clone()) {
@@ -319,24 +336,48 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
             )));
         }
         validate_nonempty("step title", &step.title)?;
-        if step
-            .guide_instruction
-            .as_deref()
-            .is_some_and(|value| value.trim().is_empty())
-        {
+        if let Some(instruction) = step.guide_instruction.as_deref() {
+            if instruction.trim().is_empty() {
+                return Err(JourneyError::Validation(format!(
+                    "step '{}' has an empty guide_instruction",
+                    step.id
+                )));
+            }
+            if schema_version == 2
+                && (instruction.len() > MAX_GUIDE_INSTRUCTION_BYTES
+                    || has_disallowed_control(instruction))
+            {
+                return Err(JourneyError::Validation(format!(
+                    "step '{}' guide_instruction must contain at most {MAX_GUIDE_INSTRUCTION_BYTES} bytes and no unsupported control characters",
+                    step.id
+                )));
+            }
+        }
+        if schema_version == 1 && !step.evidence_for.is_empty() {
             return Err(JourneyError::Validation(format!(
-                "step '{}' has an empty guide_instruction",
+                "step '{}' evidence_for requires journey schema version 2",
                 step.id
             )));
         }
+        let mut evidence_targets = HashSet::new();
+        for checkpoint in &step.evidence_for {
+            validate_id("evidence_for checkpoint", checkpoint)?;
+            if !prior_checkpoints.contains(checkpoint) || !evidence_targets.insert(checkpoint) {
+                return Err(JourneyError::Validation(format!(
+                    "step '{}' evidence_for entries must uniquely reference earlier checkpoints",
+                    step.id
+                )));
+            }
+        }
         let action = match step.action {
             StepAction::Navigate { path } => ValidatedAction::Navigate {
-                url: validate_path(&origin, &base, &path)?,
+                url: validate_path(&origin, &base, &path, schema_version)?,
             },
             StepAction::CheckUrl { path } => ValidatedAction::CheckUrl {
                 url: {
                     has_checkpoint = true;
-                    validate_path(&origin, &base, &path)?
+                    prior_checkpoints.insert(step.id.clone());
+                    validate_path(&origin, &base, &path, schema_version)?
                 },
             },
             StepAction::CheckText {
@@ -353,6 +394,7 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
                     )));
                 }
                 has_checkpoint = true;
+                prior_checkpoints.insert(step.id.clone());
                 ValidatedAction::CheckText {
                     selector,
                     expected,
@@ -376,10 +418,17 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
                 ValidatedAction::Capture { selector, alt_text }
             }
         };
+        if !step.evidence_for.is_empty() && !matches!(action, ValidatedAction::Capture { .. }) {
+            return Err(JourneyError::Validation(format!(
+                "step '{}' may declare evidence_for only on a capture action",
+                step.id
+            )));
+        }
         steps.push(ValidatedStep {
             id: step.id,
             title: step.title,
             guide_instruction: step.guide_instruction,
+            evidence_for: step.evidence_for,
             action,
         });
     }
@@ -405,7 +454,12 @@ pub fn parse_authorized_origin(value: &str) -> Result<Origin, JourneyError> {
     Origin::parse(value)
 }
 
-fn validate_path(origin: &Origin, base: &Url, value: &str) -> Result<Url, JourneyError> {
+fn validate_path(
+    origin: &Origin,
+    base: &Url,
+    value: &str,
+    schema_version: u8,
+) -> Result<Url, JourneyError> {
     if !value.starts_with('/') || value.starts_with("//") || value.contains('\\') {
         return Err(JourneyError::Validation(
             "step path must begin with one slash and contain no backslashes".to_owned(),
@@ -417,6 +471,11 @@ fn validate_path(origin: &Origin, base: &Url, value: &str) -> Result<Url, Journe
     if !origin.contains(&url) {
         return Err(JourneyError::Validation(
             "step path resolves outside the authorized origin".to_owned(),
+        ));
+    }
+    if schema_version == 2 && (url.query().is_some() || url.fragment().is_some()) {
+        return Err(JourneyError::Validation(
+            "journey v2 step paths must not contain a query or fragment".to_owned(),
         ));
     }
     Ok(url)
@@ -454,6 +513,12 @@ fn validate_selector(value: &str) -> Result<(), JourneyError> {
         )));
     }
     Ok(())
+}
+
+fn has_disallowed_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
 pub fn hex_digest(bytes: &[u8]) -> String {
@@ -596,5 +661,47 @@ action = { type = "navigate", path = "/", unexpected = true }
         let mut loaded = valid_document();
         loaded.document.steps.push(loaded.document.steps[0].clone());
         assert!(validate(loaded).is_err());
+    }
+
+    #[test]
+    fn capture_evidence_links_only_to_unique_earlier_checkpoints() {
+        let mut valid = valid_document();
+        valid.document.schema_version = 2;
+        valid.document.steps[2].evidence_for = vec!["heading".to_owned()];
+        assert_eq!(
+            validate(valid).unwrap().steps[2].evidence_for,
+            vec!["heading"]
+        );
+
+        let mut future = valid_document();
+        future.document.schema_version = 2;
+        future.document.steps[0].evidence_for = vec!["heading".to_owned()];
+        assert!(validate(future).is_err());
+
+        let mut duplicate = valid_document();
+        duplicate.document.schema_version = 2;
+        duplicate.document.steps[2].evidence_for = vec!["heading".to_owned(), "heading".to_owned()];
+        assert!(validate(duplicate).is_err());
+
+        let mut non_capture = valid_document();
+        non_capture.document.schema_version = 2;
+        non_capture.document.steps[1].evidence_for = vec!["heading".to_owned()];
+        assert!(validate(non_capture).is_err());
+    }
+
+    #[test]
+    fn v1_url_queries_remain_compatible_but_v2_rejects_redacted_operands() {
+        let mut legacy = valid_document();
+        legacy.document.steps[0].action = StepAction::Navigate {
+            path: "/?view=legacy".to_owned(),
+        };
+        assert!(validate(legacy).is_ok());
+
+        let mut current = valid_document();
+        current.document.schema_version = 2;
+        current.document.steps[0].action = StepAction::Navigate {
+            path: "/?view=current".to_owned(),
+        };
+        assert!(validate(current).is_err());
     }
 }

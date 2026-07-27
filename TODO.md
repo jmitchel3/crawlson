@@ -33,7 +33,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
   - [x] one authenticated, role-specific workflow; and
   - [x] one mutating workflow with fixture setup and cleanup.
 - [x] Record what is genuinely reusable versus Reference Project-specific.
-- [ ] Preserve a few sanitized examples as design fixtures; do not copy secrets,
+- [x] Preserve a few sanitized examples as design fixtures; do not copy secrets,
       production identifiers, or customer data.
 - [x] Write a short architecture decision describing the chosen MVP language and
       runtime. Rust was selected with a process-level `agent-browser` boundary;
@@ -67,7 +67,8 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
   - [ ] whether each step is read-only or mutating;
   - [ ] fixture setup and cleanup requirements;
   - [x] evidence to retain; and
-  - [x] guide-facing titles and instructions when applicable.
+  - [x] guide-facing titles, bounded instructions, and explicit checkpoint
+        evidence associations when applicable.
 - [x] Keep every v1 step deterministic; add agent judgment only through a
       later validated contract.
 - [x] Define run outcomes. At minimum: `passed`, `failed`, `blocked`, and
@@ -106,24 +107,25 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 
 ## Phase 3: turn runs into findings
 
-- [ ] Separate assertion failures from agent observations and infrastructure
-      errors.
-- [ ] Give every finding a severity, concise description, evidence references,
-      and reproducible steps.
+- [x] Separate deterministic assertion failures from infrastructure
+  errors.
+- [x] Give every deterministic finding an explicitly untriaged severity, concise description, evidence references,
+  and reproducible steps.
 - [ ] Deduplicate repeated symptoms within a run without hiding independent
       failures.
 - [x] Preserve partial evidence for blocked and failed journeys.
-- [ ] Add a human review state for subjective usability findings.
+- [x] Preserve an `untriaged/not_assessed` review state; subjective agent
+      observations remain outside v1.
 - [x] Produce deterministic JSON output suitable for CI and integrations.
-- [ ] Produce a readable local report that links directly to its artifacts.
+- [x] Produce readable local findings that link directly to verified artifacts.
 
 ## Phase 4: generate honest guides
 
-- [ ] Render guide steps from the same executed journey representation used for
+- [x] Render guide steps from the same executed journey representation used for
       verification; do not maintain a second hard-coded click path.
-- [ ] Include only steps that were actually completed and verified.
-- [ ] Represent blocked, text-only, incomplete, and retired guides explicitly.
-- [ ] Make image naming and replacement deterministic.
+- [x] Include only steps that were actually completed and verified.
+- [x] Represent blocked, text-only, incomplete, and conflicting guide output explicitly.
+- [x] Make image naming and renderer output deterministic and idempotent.
 - [x] Render each requested action screenshot with a reproducible red target outline
       and translucent near-black surrounding mask while preserving the raw
       screenshot as authoritative evidence.

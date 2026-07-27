@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/render-report-v1.schema.json",
+  "title": "Crawlson render report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "crawlson_version",
+    "status",
+    "publishable",
+    "reason",
+    "guide_steps",
+    "findings",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "crawlson_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "status": { "enum": ["guide_ready", "findings_ready", "not_publishable", "error"] },
+    "publishable": { "type": "boolean" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "report_sha256": { "$ref": "#/$defs/sha256" },
+    "journey": { "$ref": "#/$defs/journey" },
+    "reason": { "$ref": "#/$defs/reason" },
+    "guide_steps": { "type": "integer", "minimum": 0 },
+    "findings": { "type": "integer", "minimum": 0 },
+    "outputs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/output" }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "guide_ready" },
+        "publishable": { "const": true },
+        "guide_steps": { "type": "integer", "minimum": 1 },
+        "findings": { "const": 0 },
+        "outputs": {
+          "items": {
+            "properties": { "kind": { "enum": ["guide", "guide_image"] } },
+            "required": ["kind"]
+          },
+          "contains": {
+            "properties": { "kind": { "const": "guide" } },
+            "required": ["kind"]
+          },
+          "minContains": 1,
+          "maxContains": 1,
+          "allOf": [
+            {
+              "contains": {
+                "properties": { "kind": { "const": "guide_image" } },
+                "required": ["kind"]
+              },
+              "minContains": 1
+            }
+          ]
+        }
+      },
+      "required": ["run_id", "report_sha256", "journey"]
+    },
+    {
+      "properties": {
+        "status": { "const": "findings_ready" },
+        "publishable": { "const": true },
+        "guide_steps": { "const": 0 },
+        "findings": { "type": "integer", "minimum": 1 },
+        "outputs": {
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "properties": { "kind": { "enum": ["findings_json", "findings_markdown"] } },
+            "required": ["kind"]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "properties": { "kind": { "const": "findings_json" } },
+                "required": ["kind"]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": { "kind": { "const": "findings_markdown" } },
+                "required": ["kind"]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": ["run_id", "report_sha256", "journey"]
+    },
+    {
+      "properties": {
+        "status": { "enum": ["not_publishable", "error"] },
+        "publishable": { "const": false },
+        "guide_steps": { "const": 0 },
+        "findings": { "const": 0 },
+        "outputs": { "maxItems": 0 }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "source_sha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/output_base",
+          "properties": {
+            "kind": { "const": "guide" },
+            "path": { "const": "render/guide.md" },
+            "media_type": { "const": "text/markdown" }
+          }
+        },
+        {
+          "$ref": "#/$defs/output_base",
+          "properties": {
+            "kind": { "const": "guide_image" },
+            "path": { "type": "string", "pattern": "^render/[0-9]{3}-focused\\.png$" },
+            "media_type": { "const": "image/png" }
+          }
+        },
+        {
+          "$ref": "#/$defs/output_base",
+          "properties": {
+            "kind": { "const": "findings_json" },
+            "path": { "const": "render/findings.json" },
+            "media_type": { "const": "application/json" }
+          }
+        },
+        {
+          "$ref": "#/$defs/output_base",
+          "properties": {
+            "kind": { "const": "findings_markdown" },
+            "path": { "const": "render/findings.md" },
+            "media_type": { "const": "text/markdown" }
+          }
+        }
+      ]
+    },
+    "output_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "size_bytes", "media_type", "sha256"],
+      "properties": {
+        "kind": { "enum": ["guide", "guide_image", "findings_json", "findings_markdown"] },
+        "path": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "media_type": { "enum": ["text/markdown", "application/json", "image/png"] },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}
