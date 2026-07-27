@@ -54,16 +54,16 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [x] Define the 0.6.0 four-target bundle, signed release inventory, raw-payload
+- [x] Define the 0.7.0 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
 - [x] Prove a clean managed install and packaged demo-application HTTP startup
       from every 0.5.1 dry-run bundle without using a production key or
       publishing a release.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
-- [ ] Re-prove the clean managed install and complete packaged action demo from
-      every 0.6.0 dry-run bundle.
-- [ ] Publish signed, immutable 0.6.0 bundles and raw update payloads after the
+- [ ] Re-prove the clean managed install and complete packaged action-and-guide
+      demo from every 0.7.0 dry-run bundle.
+- [ ] Publish signed, immutable 0.7.0 bundles and raw update payloads after the
       license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts
@@ -142,9 +142,10 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] Render each requested action screenshot with a reproducible red target outline
       and translucent near-black surrounding mask while preserving the raw
       screenshot as authoritative evidence.
-- [ ] Detect orphaned images, dead Markdown links, missing index entries, and
-      stale generated output.
-- [ ] Allow application-specific rendering without coupling it to the runner.
+- [x] Detect orphaned images, dead Markdown links, missing index entries, and
+      stale generated output through a read-only collection audit.
+- [x] Provide a versioned, neutral guide-collection JSON boundary and Markdown
+      wiki adapter without coupling application presentation to the runner.
 
 ## Phase 5: regression and CI workflow
 

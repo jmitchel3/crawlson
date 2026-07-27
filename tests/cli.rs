@@ -895,6 +895,12 @@ fn published_journey_v2_schema_accepts_the_example_and_rejects_ambiguous_extensi
     let document = serde_json::to_value(document).unwrap();
     validator.validate(&document).unwrap();
 
+    for id in [".leading", "_leading", "-leading"] {
+        let mut leading_punctuation = document.clone();
+        leading_punctuation["journey"]["id"] = Value::String(id.to_owned());
+        validator.validate(&leading_punctuation).unwrap();
+    }
+
     let mut non_capture_association = document.clone();
     non_capture_association["steps"][0]["evidence_for"] = serde_json::json!(["confirm-location"]);
     assert!(validator.validate(&non_capture_association).is_err());
@@ -1557,6 +1563,856 @@ fn render_preserves_conflicting_output_and_escapes_authored_markdown() {
     );
 }
 
+#[test]
+fn guide_collection_build_and_check_are_deterministic_alias_equivalent() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let read_journey = write_journey(directory.path(), "Hello", false);
+    let read_run = run_command(
+        "crawlson",
+        &read_journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert!(read_run.status.success());
+    let read_report: Value = serde_json::from_slice(&read_run.stdout).unwrap();
+    let read_root = PathBuf::from(read_report["run_directory"].as_str().unwrap());
+
+    let action_journey = write_follow_link_journey(directory.path(), "/complete");
+    let action_run = run_command(
+        "crawlson",
+        &action_journey,
+        directory.path(),
+        &fixture,
+        &[
+            "--allow-origin",
+            "http://127.0.0.1:4173",
+            "--allow-action",
+            "fixture.follow-link@1:follow-continue",
+        ],
+    );
+    assert!(action_run.status.success());
+    let action_report: Value = serde_json::from_slice(&action_run.stdout).unwrap();
+    let action_root = PathBuf::from(action_report["run_directory"].as_str().unwrap());
+
+    let manifest = write_collection_manifest(
+        directory.path(),
+        &[
+            ("read-home", 10, &read_root, &read_journey),
+            ("follow-continue", 20, &action_root, &action_journey),
+        ],
+    );
+    let manifest_document: toml::Value =
+        toml::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    validate_schema(
+        include_str!("../schemas/guide-collection-manifest-v1.schema.json"),
+        &serde_json::to_value(manifest_document).unwrap(),
+    );
+    let output = directory.path().join("guide-site");
+    let missing = collection_command("crawlson", "check", &manifest, &output);
+    assert_eq!(missing.status.code(), Some(3));
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["status"], "not_publishable");
+    assert_eq!(missing["diagnostics"][0]["code"], "output_missing");
+    assert!(!output.exists());
+    let build = collection_command("crawlson", "build", &manifest, &output);
+    assert_eq!(
+        build.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&build.stdout)
+    );
+    assert!(build.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+    assert_eq!(report["status"], "ready");
+    assert_eq!(report["publishable"], true);
+    assert_eq!(report["summary"]["guides"], 2);
+    validate_schema(
+        include_str!("../schemas/guide-collection-report-v1.schema.json"),
+        &report,
+    );
+    let application: Value =
+        serde_json::from_slice(&fs::read(output.join("guide-collection.json")).unwrap()).unwrap();
+    validate_schema(
+        include_str!("../schemas/guide-collection-v1.schema.json"),
+        &application,
+    );
+    assert_eq!(
+        application["collection"]["manifest_sha256"],
+        report["collection"]["manifest_sha256"]
+    );
+    assert_eq!(
+        application["collection"]["snapshot_sha256"],
+        report["collection"]["snapshot_sha256"]
+    );
+    assert!(output.join("index.md").is_file());
+    assert!(output.join("topics/basics/index.md").is_file());
+    assert!(output.join("topics/basics/read-home/index.md").is_file());
+    assert!(
+        output
+            .join("topics/basics/follow-continue/index.md")
+            .is_file()
+    );
+    assert!(
+        fs::read_to_string(output.join("index.md"))
+            .unwrap()
+            .contains("topics/basics/index.md")
+    );
+    assert!(
+        fs::read_to_string(output.join("topics/basics/read-home/index.md"))
+            .unwrap()
+            .contains("../follow-continue/index.md")
+    );
+    let topic_index = fs::read_to_string(output.join("topics/basics/index.md")).unwrap();
+    assert!(topic_index.contains("1. [Read home](read-home/index.md)"));
+    assert!(topic_index.contains("2. [Follow Continue](follow-continue/index.md)"));
+    assert!(!topic_index.contains("10. ["));
+    assert!(!topic_index.contains("20. ["));
+    let root_index = fs::read_to_string(output.join("index.md")).unwrap();
+    assert!(root_index.contains("Audience: visitors"));
+    let direct_guide = fs::read_to_string(output.join("topics/basics/read-home/index.md")).unwrap();
+    assert!(direct_guide.contains("Audience: visitors"));
+    assert!(direct_guide.contains("[← Basics](../index.md)"));
+
+    let app_guides = application["topics"][0]["guides"].as_array().unwrap();
+    assert_eq!(app_guides.len(), 2);
+    for app_guide in app_guides {
+        let page = app_guide["page"].as_str().unwrap();
+        let page_bytes = fs::read(output.join(page)).unwrap();
+        assert_eq!(app_guide["page_size_bytes"], page_bytes.len() as u64);
+        assert_eq!(
+            app_guide["page_sha256"],
+            crawlson::journey::hex_digest(&page_bytes)
+        );
+    }
+    let read_app = &app_guides[0];
+    assert_eq!(read_app["journey"]["id"], "fixture.read-home");
+    assert_eq!(read_app["steps"].as_array().unwrap().len(), 1);
+    let read_step = &read_app["steps"][0];
+    assert_eq!(read_step["id"], "capture-heading");
+    assert_eq!(read_step["number"], 1);
+    assert_eq!(read_step["title"], "Capture the heading");
+    assert_eq!(read_step["instruction"], "Review the highlighted heading.");
+    assert_eq!(read_step["claim_type"], "observed_next_action");
+    assert_eq!(read_step["alt_text"], "Highlighted heading");
+    assert!(
+        read_step["claim"]
+            .as_str()
+            .unwrap()
+            .contains("does not claim that action was executed")
+    );
+    assert_eq!(read_app["images"][0], read_step["image"]);
+
+    let action_app = &app_guides[1];
+    assert_eq!(action_app["journey"]["id"], "fixture.follow-link");
+    assert_eq!(action_app["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(action_app["steps"][0]["id"], "follow-continue");
+    assert_eq!(
+        action_app["steps"][0]["claim_type"],
+        "executed_and_verified"
+    );
+    assert!(
+        action_app["steps"][0]["claim"]
+            .as_str()
+            .unwrap()
+            .contains("executed this highlighted link action once")
+    );
+
+    let read_report_sha =
+        crawlson::journey::hex_digest(&fs::read(read_root.join("report.json")).unwrap());
+    assert_eq!(read_app["report_sha256"], read_report_sha);
+    for path in [
+        read_app["page"].as_str().unwrap(),
+        read_step["image"]["path"].as_str().unwrap(),
+    ] {
+        let record = report["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["path"] == path)
+            .unwrap();
+        assert_eq!(record["topic_id"], "basics");
+        assert_eq!(record["entry"], "read-home");
+        assert_eq!(record["journey_id"], "fixture.read-home");
+        assert_eq!(record["report_sha256"], read_report_sha);
+        let bytes = fs::read(output.join(path)).unwrap();
+        assert_eq!(record["size_bytes"], bytes.len() as u64);
+        assert_eq!(record["sha256"], crawlson::journey::hex_digest(&bytes));
+    }
+    let read_focused = read_report["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["kind"] == "focused_screenshot")
+        .unwrap()["path"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        fs::read(output.join("topics/basics/read-home/001-focused.png")).unwrap(),
+        fs::read(read_root.join(read_focused)).unwrap()
+    );
+    assert!(!read_root.join("render").exists());
+    assert!(!action_root.join("render").exists());
+
+    let before = snapshot_directory(&output);
+    let check = collection_command("clson", "check", &manifest, &output);
+    assert_eq!(check.status.code(), Some(0));
+    assert_eq!(build.stdout, check.stdout);
+    assert_eq!(before, snapshot_directory(&output));
+    let second = collection_command("clson", "build", &manifest, &output);
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(build.stdout, second.stdout);
+    assert_eq!(before, snapshot_directory(&output));
+}
+
+#[test]
+fn guide_collection_surfaces_findings_without_emitting_a_partial_public_index() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let pass_journey = write_journey(directory.path(), "Hello", false);
+    let pass_run = run_command(
+        "crawlson",
+        &pass_journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    let pass_report: Value = serde_json::from_slice(&pass_run.stdout).unwrap();
+    let pass_root = PathBuf::from(pass_report["run_directory"].as_str().unwrap());
+
+    let fail_journey = directory.path().join("failure.toml");
+    let failure_source = fs::read_to_string(&pass_journey)
+        .unwrap()
+        .replace("fixture.read-home", "fixture.fail-home")
+        .replace("title = \"Read home\"", "title = \"Find broken heading\"")
+        .replace("expected = \"Hello\"", "expected = \"Missing\"");
+    fs::write(&fail_journey, failure_source).unwrap();
+    let fail_run = run_command(
+        "crawlson",
+        &fail_journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert_eq!(fail_run.status.code(), Some(1));
+    let fail_report: Value = serde_json::from_slice(&fail_run.stdout).unwrap();
+    let fail_root = PathBuf::from(fail_report["run_directory"].as_str().unwrap());
+
+    let blocked_journey = directory.path().join("blocked.toml");
+    let blocked_source = fs::read_to_string(&pass_journey)
+        .unwrap()
+        .replace("fixture.read-home", "fixture.blocked-home")
+        .replace("title = \"Read home\"", "title = \"Blocked home\"");
+    fs::write(&blocked_journey, blocked_source).unwrap();
+    let blocked_run = run_command(
+        "crawlson",
+        &blocked_journey,
+        directory.path(),
+        &fixture,
+        &[],
+    );
+    assert_eq!(blocked_run.status.code(), Some(3));
+    let blocked_report: Value = serde_json::from_slice(&blocked_run.stdout).unwrap();
+    let blocked_root = PathBuf::from(blocked_report["run_directory"].as_str().unwrap());
+
+    let manifest = write_collection_manifest(
+        directory.path(),
+        &[
+            ("read-home", 10, &pass_root, &pass_journey),
+            ("broken-heading", 20, &fail_root, &fail_journey),
+            ("blocked-home", 30, &blocked_root, &blocked_journey),
+        ],
+    );
+    let output = directory.path().join("review-site");
+    let build = collection_command("crawlson", "build", &manifest, &output);
+    assert_eq!(
+        build.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+    assert_eq!(report["status"], "not_publishable");
+    assert_eq!(report["publishable"], false);
+    assert_eq!(report["summary"]["guides"], 1);
+    assert_eq!(report["summary"]["findings"], 1);
+    assert_eq!(report["summary"]["unavailable"], 1);
+    assert_eq!(report["summary"]["errors"], 0);
+    assert_eq!(report["entries"][0]["status"], "guide_ready");
+    assert_eq!(report["entries"][1]["status"], "findings_ready");
+    assert_eq!(report["entries"][2]["status"], "not_publishable");
+    validate_schema(
+        include_str!("../schemas/guide-collection-report-v1.schema.json"),
+        &report,
+    );
+    assert!(!output.join("index.md").exists());
+    assert!(!output.join("guide-collection.json").exists());
+    assert!(output.join("review/index.md").is_file());
+    let findings_root = output.join("review/basics/broken-heading");
+    assert!(findings_root.join("render/findings.json").is_file());
+    assert!(findings_root.join("render/findings.md").is_file());
+    assert!(findings_root.join("report.json").is_file());
+    assert!(findings_root.join("evidence/trace.json").is_file());
+    assert!(
+        fs::read_to_string(output.join("review/index.md"))
+            .unwrap()
+            .contains("basics/broken-heading/render/findings.md")
+    );
+    let review_index = fs::read_to_string(output.join("review/index.md")).unwrap();
+    assert!(review_index.contains("Read home** — verified, but withheld"));
+    assert!(review_index.contains("Find broken heading** — 1 finding(s)"));
+    assert!(review_index.contains("Blocked home** — unavailable"));
+    let check = collection_command("clson", "check", &manifest, &output);
+    assert_eq!(check.status.code(), Some(3));
+    assert_eq!(build.stdout, check.stdout);
+}
+
+#[test]
+fn guide_collection_preserves_blocked_and_tampered_outcomes() {
+    let fixture = FakeAgentBrowser::compile();
+    for (fault, expected_reason) in [
+        ("blocked", "run_blocked"),
+        ("tampered", "artifact_tampered"),
+        ("run-error", "run_error"),
+        ("cleanup-error", "cleanup_failed"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let journey = write_journey(directory.path(), "Hello", false);
+        fixture.set_scenario(match fault {
+            "run-error" => "malformed",
+            "cleanup-error" => "cleanup_fail",
+            _ => "pass",
+        });
+        let authorization = if fault == "blocked" {
+            Vec::new()
+        } else {
+            vec!["--allow-origin", "http://127.0.0.1:4173"]
+        };
+        let run = run_command(
+            "crawlson",
+            &journey,
+            directory.path(),
+            &fixture,
+            &authorization,
+        );
+        let run_report: Value = serde_json::from_slice(&run.stdout).unwrap();
+        let root = PathBuf::from(run_report["run_directory"].as_str().unwrap());
+        if fault == "tampered" {
+            let focused = run_report["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["kind"] == "focused_screenshot")
+                .unwrap()["path"]
+                .as_str()
+                .unwrap();
+            fs::write(root.join(focused), b"tampered").unwrap();
+        }
+        let manifest =
+            write_collection_manifest(directory.path(), &[("read-home", 10, &root, &journey)]);
+        let output = directory.path().join("collection");
+        let build = collection_command("crawlson", "build", &manifest, &output);
+        if fault == "blocked" {
+            assert_eq!(build.status.code(), Some(3));
+            let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+            assert_eq!(report["status"], "not_publishable");
+            assert_eq!(report["summary"]["unavailable"], 1);
+            assert_eq!(report["entries"][0]["reason_code"], expected_reason);
+            validate_schema(
+                include_str!("../schemas/guide-collection-report-v1.schema.json"),
+                &report,
+            );
+            assert!(output.join("review/index.md").is_file());
+            assert!(!output.join("index.md").exists());
+        } else {
+            assert_eq!(build.status.code(), Some(4));
+            let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+            assert_eq!(report["status"], "error");
+            assert_eq!(report["diagnostics"][0]["code"], expected_reason);
+            assert_eq!(report["diagnostics"][0]["entry"], "read-home");
+            assert_eq!(report["entries"][0]["reason_code"], expected_reason);
+            validate_schema(
+                include_str!("../schemas/guide-collection-report-v1.schema.json"),
+                &report,
+            );
+            assert!(!output.exists());
+        }
+    }
+}
+
+#[test]
+fn guide_collection_aggregates_guide_ready_and_error_entries_without_output() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    fixture.set_scenario("pass");
+    let pass_journey = write_journey(directory.path(), "Hello", false);
+    let pass_run = run_command(
+        "crawlson",
+        &pass_journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert!(pass_run.status.success());
+    let pass_report: Value = serde_json::from_slice(&pass_run.stdout).unwrap();
+    let pass_root = PathBuf::from(pass_report["run_directory"].as_str().unwrap());
+
+    let error_journey = directory.path().join("error.toml");
+    let error_source = fs::read_to_string(&pass_journey)
+        .unwrap()
+        .replace("fixture.read-home", "fixture.error-home")
+        .replace("title = \"Read home\"", "title = \"Error home\"");
+    fs::write(&error_journey, error_source).unwrap();
+    fixture.set_scenario("malformed");
+    let error_run = run_command(
+        "crawlson",
+        &error_journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert_eq!(error_run.status.code(), Some(4));
+    let error_report: Value = serde_json::from_slice(&error_run.stdout).unwrap();
+    let error_root = PathBuf::from(error_report["run_directory"].as_str().unwrap());
+
+    let manifest = write_collection_manifest(
+        directory.path(),
+        &[
+            ("read-home", 10, &pass_root, &pass_journey),
+            ("error-home", 20, &error_root, &error_journey),
+        ],
+    );
+    let output = directory.path().join("error-collection");
+    let build = collection_command("crawlson", "build", &manifest, &output);
+    assert_eq!(build.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+    assert_eq!(report["status"], "error");
+    assert_eq!(report["publishable"], false);
+    assert_eq!(report["summary"]["guides"], 1);
+    assert_eq!(report["summary"]["errors"], 1);
+    assert_eq!(report["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(report["entries"][0]["status"], "guide_ready");
+    assert_eq!(report["entries"][1]["status"], "error");
+    assert_eq!(report["entries"][1]["reason_code"], "run_error");
+    assert_eq!(report["diagnostics"].as_array().unwrap().len(), 1);
+    assert_eq!(report["diagnostics"][0]["code"], "run_error");
+    assert_eq!(report["diagnostics"][0]["entry"], "error-home");
+    assert!(report["outputs"].as_array().unwrap().is_empty());
+    validate_schema(
+        include_str!("../schemas/guide-collection-report-v1.schema.json"),
+        &report,
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn guide_collection_check_treats_status_shape_transitions_as_stale_and_read_only() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    fixture.set_scenario("pass");
+    let journey = write_journey(directory.path(), "Hello", false);
+    let ready_run = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert!(ready_run.status.success());
+    let ready_report: Value = serde_json::from_slice(&ready_run.stdout).unwrap();
+    let ready_root = PathBuf::from(ready_report["run_directory"].as_str().unwrap());
+    let ready_manifest = write_collection_manifest(
+        directory.path(),
+        &[("read-home", 10, &ready_root, &journey)],
+    );
+    let ready_output = directory.path().join("ready-output");
+    assert!(
+        collection_command("crawlson", "build", &ready_manifest, &ready_output)
+            .status
+            .success()
+    );
+    let ready_snapshot = snapshot_directory(&ready_output);
+
+    let blocked_run = run_command("crawlson", &journey, directory.path(), &fixture, &[]);
+    assert_eq!(blocked_run.status.code(), Some(3));
+    let blocked_report: Value = serde_json::from_slice(&blocked_run.stdout).unwrap();
+    let blocked_root = PathBuf::from(blocked_report["run_directory"].as_str().unwrap());
+    let blocked_manifest = write_collection_manifest(
+        directory.path(),
+        &[("read-home", 10, &blocked_root, &journey)],
+    );
+    let blocked_check = collection_command("crawlson", "check", &blocked_manifest, &ready_output);
+    assert_eq!(blocked_check.status.code(), Some(3));
+    let blocked_check: Value = serde_json::from_slice(&blocked_check.stdout).unwrap();
+    assert_eq!(blocked_check["status"], "not_publishable");
+    assert!(
+        blocked_check["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|diagnostic| diagnostic["code"] == "stale_output")
+    );
+    assert_eq!(ready_snapshot, snapshot_directory(&ready_output));
+
+    fixture.set_scenario("fail_text");
+    let findings_run = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert_eq!(findings_run.status.code(), Some(1));
+    let findings_report: Value = serde_json::from_slice(&findings_run.stdout).unwrap();
+    let findings_root = PathBuf::from(findings_report["run_directory"].as_str().unwrap());
+    let findings_manifest = write_collection_manifest(
+        directory.path(),
+        &[("read-home", 10, &findings_root, &journey)],
+    );
+    let findings_check = collection_command("crawlson", "check", &findings_manifest, &ready_output);
+    assert_eq!(findings_check.status.code(), Some(3));
+    let findings_check: Value = serde_json::from_slice(&findings_check.stdout).unwrap();
+    assert_eq!(findings_check["status"], "not_publishable");
+    assert!(
+        findings_check["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|diagnostic| diagnostic["code"] == "stale_output")
+    );
+    assert_eq!(ready_snapshot, snapshot_directory(&ready_output));
+
+    let review_output = directory.path().join("review-output");
+    assert_eq!(
+        collection_command("crawlson", "build", &findings_manifest, &review_output)
+            .status
+            .code(),
+        Some(1)
+    );
+    let review_snapshot = snapshot_directory(&review_output);
+    let ready_manifest = write_collection_manifest(
+        directory.path(),
+        &[("read-home", 10, &ready_root, &journey)],
+    );
+    let ready_check = collection_command("crawlson", "check", &ready_manifest, &review_output);
+    assert_eq!(ready_check.status.code(), Some(3));
+    let ready_check: Value = serde_json::from_slice(&ready_check.stdout).unwrap();
+    assert_eq!(ready_check["status"], "not_publishable");
+    assert!(
+        ready_check["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|diagnostic| diagnostic["code"] == "stale_output")
+    );
+    assert_eq!(review_snapshot, snapshot_directory(&review_output));
+}
+
+#[test]
+fn guide_collection_check_detects_stale_dead_orphaned_and_unindexed_output_read_only() {
+    let fixture = FakeAgentBrowser::compile();
+    for fault in ["stale", "changed", "dead", "orphan", "unindexed"] {
+        let directory = tempfile::tempdir().unwrap();
+        let journey = write_journey(directory.path(), "Hello", false);
+        let run = run_command(
+            "crawlson",
+            &journey,
+            directory.path(),
+            &fixture,
+            &["--allow-origin", "http://127.0.0.1:4173"],
+        );
+        let run_report: Value = serde_json::from_slice(&run.stdout).unwrap();
+        let root = PathBuf::from(run_report["run_directory"].as_str().unwrap());
+        let manifest =
+            write_collection_manifest(directory.path(), &[("read-home", 10, &root, &journey)]);
+        let output = directory.path().join("collection");
+        assert!(
+            collection_command("crawlson", "build", &manifest, &output)
+                .status
+                .success()
+        );
+        match fault {
+            "stale" => {
+                let source = fs::read_to_string(&manifest)
+                    .unwrap()
+                    .replace("Verified help", "Current verified help");
+                fs::write(&manifest, source).unwrap();
+            }
+            "changed" => {
+                fs::write(
+                    output.join("topics/basics/read-home/001-focused.png"),
+                    b"changed image bytes",
+                )
+                .unwrap();
+            }
+            "dead" => {
+                let index = output.join("index.md");
+                let source = fs::read_to_string(&index)
+                    .unwrap()
+                    .replace("topics/basics/index.md", "topics/missing/index.md");
+                fs::write(index, source).unwrap();
+            }
+            "orphan" => {
+                fs::write(output.join("orphan.png"), b"not a registered image").unwrap();
+            }
+            "unindexed" => {
+                let topic = output.join("topics/basics/index.md");
+                let source = fs::read_to_string(&topic)
+                    .unwrap()
+                    .replace("1. [Read home](read-home/index.md)\n", "");
+                fs::write(topic, source).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = snapshot_directory(&output);
+        let check = collection_command("crawlson", "check", &manifest, &output);
+        let report: Value = serde_json::from_slice(&check.stdout).unwrap();
+        validate_schema(
+            include_str!("../schemas/guide-collection-report-v1.schema.json"),
+            &report,
+        );
+        match fault {
+            "stale" => {
+                assert_eq!(check.status.code(), Some(3));
+                assert!(
+                    report["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["code"] == "stale_output")
+                );
+            }
+            "changed" => {
+                assert_eq!(check.status.code(), Some(4));
+                assert!(
+                    report["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["code"] == "changed_output")
+                );
+            }
+            "dead" => {
+                assert_eq!(check.status.code(), Some(4));
+                assert!(
+                    report["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["code"] == "dead_link")
+                );
+            }
+            "orphan" => {
+                assert_eq!(check.status.code(), Some(4));
+                assert!(
+                    report["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["code"] == "orphan_image")
+                );
+            }
+            "unindexed" => {
+                assert_eq!(check.status.code(), Some(4));
+                assert!(
+                    report["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["code"] == "missing_index_entry")
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(before, snapshot_directory(&output));
+        let rebuild = collection_command("crawlson", "build", &manifest, &output);
+        assert_eq!(rebuild.status.code(), Some(4));
+        assert_eq!(before, snapshot_directory(&output));
+    }
+}
+
+#[test]
+fn guide_collection_rejects_ambiguous_or_escaping_manifests_before_output() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_journey(directory.path(), "Hello", false);
+    let run = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    let run_report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let root = PathBuf::from(run_report["run_directory"].as_str().unwrap());
+    for (fault, expected_code) in [
+        ("duplicate-key", "guide_key_duplicate"),
+        ("duplicate-journey", "journey_identity_duplicate"),
+        ("escape", "manifest_path_invalid"),
+        ("unknown", "manifest_invalid"),
+        ("repeated-slash", "manifest_path_invalid"),
+        ("trailing-slash", "manifest_path_invalid"),
+        ("reserved-path", "manifest_path_invalid"),
+        ("trailing-dot-path", "manifest_path_invalid"),
+        ("illegal-character-path", "manifest_path_invalid"),
+        ("index-guide-key", "manifest_invalid"),
+        ("trailing-dot-id", "manifest_invalid"),
+        ("reserved-con", "manifest_invalid"),
+        ("reserved-prn", "manifest_invalid"),
+        ("reserved-aux", "manifest_invalid"),
+        ("reserved-nul", "manifest_invalid"),
+        ("reserved-com1", "manifest_invalid"),
+        ("reserved-lpt9", "manifest_invalid"),
+        ("reserved-extension", "manifest_invalid"),
+    ] {
+        let manifest =
+            write_collection_manifest(directory.path(), &[("read-home", 10, &root, &journey)]);
+        let mut source = fs::read_to_string(&manifest).unwrap();
+        let run_relative = portable_relative(directory.path(), &root);
+        match fault {
+            "duplicate-key" => source.push_str(&format!(
+                "\n[[topics.guides]]\nkey = \"read-home\"\norder = 20\nrun = \"{}\"\njourney = \"{}\"\n",
+                portable_relative(directory.path(), &root),
+                portable_relative(directory.path(), &journey)
+            )),
+            "duplicate-journey" => source.push_str(&format!(
+                "\n[[topics.guides]]\nkey = \"read-home-again\"\norder = 20\nrun = \"{}\"\njourney = \"{}\"\n",
+                portable_relative(directory.path(), &root),
+                portable_relative(directory.path(), &journey)
+            )),
+            "escape" => source = source.replace(
+                &format!("journey = \"{}\"", portable_relative(directory.path(), &journey)),
+                "journey = \"../outside.toml\"",
+            ),
+            "unknown" => source.push_str("\nunknown = true\n"),
+            "repeated-slash" => {
+                let repeated = run_relative.replacen('/', "//", 1);
+                source = source.replace(
+                    &format!("run = \"{run_relative}\""),
+                    &format!("run = \"{repeated}\""),
+                );
+            }
+            "trailing-slash" => {
+                source = source.replace(
+                    &format!("run = \"{run_relative}\""),
+                    &format!("run = \"{run_relative}/\""),
+                );
+            }
+            "reserved-path" => {
+                source = source.replace(
+                    &format!("run = \"{run_relative}\""),
+                    "run = \"con/report.json\"",
+                );
+            }
+            "trailing-dot-path" => {
+                source = source.replace(
+                    &format!("run = \"{run_relative}\""),
+                    "run = \"runs./report.json\"",
+                );
+            }
+            "illegal-character-path" => {
+                source = source.replace(
+                    &format!("run = \"{run_relative}\""),
+                    "run = \"runs?/report.json\"",
+                );
+            }
+            "index-guide-key" => {
+                source = source.replace("key = \"read-home\"", "key = \"index.md\"");
+            }
+            "trailing-dot-id" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"fixture-help.\"");
+            }
+            "reserved-con" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"con\"");
+            }
+            "reserved-prn" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"prn\"");
+            }
+            "reserved-aux" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"aux\"");
+            }
+            "reserved-nul" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"nul\"");
+            }
+            "reserved-com1" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"com1\"");
+            }
+            "reserved-lpt9" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"lpt9\"");
+            }
+            "reserved-extension" => {
+                source = source.replace("id = \"fixture-help\"", "id = \"con.txt\"");
+            }
+            _ => unreachable!(),
+        }
+        if !matches!(fault, "duplicate-key" | "duplicate-journey") {
+            let document: toml::Value = toml::from_str(&source).unwrap();
+            assert_schema_rejects(
+                include_str!("../schemas/guide-collection-manifest-v1.schema.json"),
+                &serde_json::to_value(document).unwrap(),
+            );
+        }
+        fs::write(&manifest, source).unwrap();
+        let output = directory.path().join(format!("collection-{fault}"));
+        let build = collection_command("crawlson", "build", &manifest, &output);
+        assert_eq!(build.status.code(), Some(4), "{fault}");
+        let report: Value = serde_json::from_slice(&build.stdout).unwrap();
+        assert_eq!(report["status"], "error");
+        assert_eq!(report["diagnostics"][0]["code"], expected_code, "{fault}");
+        validate_schema(
+            include_str!("../schemas/guide-collection-report-v1.schema.json"),
+            &report,
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn guide_collection_rejects_symlinked_inputs_and_outputs() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_journey(directory.path(), "Hello", false);
+    let run = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    let run_report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let root = PathBuf::from(run_report["run_directory"].as_str().unwrap());
+    let linked_run = directory.path().join("linked-run");
+    symlink(&root, &linked_run).unwrap();
+    let manifest = write_collection_manifest(
+        directory.path(),
+        &[("read-home", 10, &linked_run, &journey)],
+    );
+    let output = directory.path().join("collection");
+    assert_eq!(
+        collection_command("crawlson", "build", &manifest, &output)
+            .status
+            .code(),
+        Some(4)
+    );
+
+    fs::remove_file(linked_run).unwrap();
+    let manifest =
+        write_collection_manifest(directory.path(), &[("read-home", 10, &root, &journey)]);
+    let real_output = directory.path().join("real-output");
+    fs::create_dir(&real_output).unwrap();
+    symlink(&real_output, &output).unwrap();
+    assert_eq!(
+        collection_command("crawlson", "check", &manifest, &output)
+            .status
+            .code(),
+        Some(4)
+    );
+}
+
 fn write_json(path: PathBuf, value: &Value) {
     fs::write(
         path,
@@ -1633,6 +2489,97 @@ fn render_command(name: &str, run_directory: &Path, journey: &Path) -> std::proc
         .arg(journey)
         .output()
         .unwrap()
+}
+
+fn collection_command(
+    name: &str,
+    action: &str,
+    manifest: &Path,
+    output: &Path,
+) -> std::process::Output {
+    Command::new(cargo_bin(name))
+        .args(["--json", "guides", action])
+        .arg(manifest)
+        .arg("--output")
+        .arg(output)
+        .env("CRAWLSON_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap()
+}
+
+fn write_collection_manifest(directory: &Path, entries: &[(&str, u32, &Path, &Path)]) -> PathBuf {
+    let mut source = r#"schema_version = 1
+
+[collection]
+id = "fixture-help"
+title = "Fixture Help"
+description = "Verified help"
+
+[[topics]]
+id = "basics"
+title = "Basics"
+description = "Complete fixture workflows"
+order = 10
+audience = ["visitors"]
+"#
+    .to_owned();
+    for (key, order, run, journey) in entries {
+        source.push_str(&format!(
+            r#"
+[[topics.guides]]
+key = "{key}"
+order = {order}
+run = "{}"
+journey = "{}"
+"#,
+            portable_relative(directory, run),
+            portable_relative(directory, journey)
+        ));
+    }
+    let path = directory.join("guide-collection.toml");
+    fs::write(&path, source).unwrap();
+    path
+}
+
+fn portable_relative(base: &Path, path: &Path) -> String {
+    let relative = path
+        .strip_prefix(base)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| {
+            path.canonicalize()
+                .unwrap()
+                .strip_prefix(base.canonicalize().unwrap())
+                .unwrap()
+                .to_path_buf()
+        });
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn snapshot_directory(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &entry.path(), files);
+            } else {
+                files.push((
+                    portable_relative(root, &entry.path()),
+                    fs::read(entry.path()).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files
 }
 
 fn write_journey(directory: &Path, expected: &str, authenticated: bool) -> PathBuf {

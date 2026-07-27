@@ -1,7 +1,7 @@
 # Self-contained demo contract
 
-Status: implemented in Crawlson 0.4.0 and extended with authorized link actions
-in Crawlson 0.6.0.
+Status: implemented in Crawlson 0.4.0, extended with authorized link actions in
+Crawlson 0.6.0, and extended with guide collections in Crawlson 0.7.0.
 
 The demo proves the smallest independently useful Crawlson product loop without
 an external application, credentials, or private fixtures:
@@ -24,8 +24,9 @@ for the demo and for an authorized external target.
   its exact destination before rendering an executed guide step.
 - `examples/follow-link-fail.toml` follows a same-origin redirect fixture and
   turns its acknowledged wrong final URL into a link-postcondition finding.
-- `scripts/demo.sh` coordinates the server, all four journeys, rendering, and
-  missing target- and action-authorization safety checks.
+- `scripts/demo.sh` coordinates the server, all four journeys, rendering,
+  missing target- and action-authorization safety checks, a two-guide public
+  collection, and a two-finding review collection.
 - `tests/real_agent_browser.rs` independently validates the full artifact and
   report contract through a real supported browser driver.
 
@@ -69,12 +70,27 @@ codes, successful cleanup, the blocked runs' empty command lists, and the
 required evidence files. It exits 0 only when all six outcomes match the
 contract.
 
+The script then copies only the four public journey definitions into its
+artifact workspace and writes two runtime manifests. The successful manifest
+builds and checks a public root/topic/guide tree. The failure manifest builds
+and checks a separate review tree and exits 1 both times; it must not emit a
+partial public root index. Collection generation revalidates raw runs from a
+bounded temporary snapshot and ignores the single-run `render/` directories the
+demo already produced.
+
 Each executed browser run preserves `report.json`, a trace, a raw viewport PNG,
 a focused PNG, and focus metadata. The focused image keeps the selected action
 area readable, draws the configured vivid red outline, and dims the surrounding
 page with a translucent near-black mask. The raw screenshot remains the
 authoritative browser evidence; the focused image is a reproducible guide and
 finding derivative, not a redaction.
+
+The public collection preserves each focused PNG byte-for-byte and adds
+deterministic root, topic, guide, previous, and next navigation. The review tree
+retains the structured findings and only their referenced evidence. Neither
+focused UI pixels nor review evidence are automatically safe for public
+release; an application should ingest a public tree only when its report is
+`ready` and `publishable`.
 
 The real-browser integration rehashes every registered artifact, decodes the
 raw and focused PNGs, checks the exact outline color, checks that the action

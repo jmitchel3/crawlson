@@ -1,7 +1,7 @@
 # Release and managed-install contract v1
 
-Status: defined for Crawlson 0.6.0. The repository can exercise this contract
-with non-publishing dry-run artifacts, but no public 0.6.0 release exists yet.
+Status: defined for Crawlson 0.7.0. The repository can exercise this contract
+with non-publishing dry-run artifacts, but no public 0.7.0 release exists yet.
 
 ## Purpose and boundaries
 

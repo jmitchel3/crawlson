@@ -1543,7 +1543,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn check_only_never_invokes_the_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: true,
@@ -1563,7 +1563,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn managed_manual_upgrade_invokes_the_injected_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1585,7 +1585,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn managed_manual_upgrade_blocks_before_download_without_raw_replacement() {
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let result = run_manual_with_backend_capability(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1605,7 +1605,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         assert_eq!(backend.installs.get(), 0);
         let report: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
         assert_eq!(report["status"], "blocked");
-        assert_eq!(report["latest_version"], "0.6.1");
+        assert_eq!(report["latest_version"], "0.7.1");
         assert!(
             report["release_url"]
                 .as_str()
@@ -1623,7 +1623,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
     #[cfg(windows)]
     #[test]
     fn windows_build_wires_manual_upgrade_to_the_no_download_policy() {
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let result = run_manual_with_backend_capability(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1647,7 +1647,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn rendered_manual_policy_rejects_downgrades_and_prereleases() {
-        for version in ["0.5.9", "0.6.1-alpha.1"] {
+        for version in ["0.6.9", "0.7.1-alpha.1"] {
             let backend = FakeBackend::new(Some(candidate(version)));
             let result = run_manual_with_backend(
                 ManualUpgradeOptions {
@@ -1686,7 +1686,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn unknown_installations_fail_closed_before_replacement() {
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1733,7 +1733,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             state: directory.path().join("state.json"),
             lock: directory.path().join("state.lock"),
         };
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let ownership = InstallOwnership::Standalone(ManagedInstall {
             binary: PathBuf::from("crawlson.exe"),
             install_id: "fixture-install".to_owned(),
@@ -1752,7 +1752,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         assert_eq!(backend.installs.get(), 0);
         let state = read_state(&paths.state).unwrap();
         assert_eq!(state.install_id, "fixture-install");
-        assert_eq!(state.latest_seen, Some(Version::parse("0.6.1").unwrap()));
+        assert_eq!(state.latest_seen, Some(Version::parse("0.7.1").unwrap()));
         assert_eq!(state.last_success_at, Some(1_000_000));
         assert_eq!(state.failure_count, 0);
         assert!(
@@ -1771,7 +1771,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             state: directory.path().join("state.json"),
             lock: directory.path().join("state.lock"),
         };
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
         let _lock = try_update_lock(&paths).unwrap().unwrap();
 
         periodic_worker_locked(
@@ -1791,7 +1791,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
         assert_eq!(backend.installs.get(), 0);
         let state = read_state(&paths.state).unwrap();
-        assert_eq!(state.latest_seen, Some(Version::parse("0.6.1").unwrap()));
+        assert_eq!(state.latest_seen, Some(Version::parse("0.7.1").unwrap()));
         assert_eq!(state.last_install_at, None);
     }
 
@@ -1805,7 +1805,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             state: directory.path().join("state.json"),
             lock: directory.path().join("state.lock"),
         };
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
 
         periodic_worker_with_context(
             &paths,
@@ -1822,7 +1822,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         assert_eq!(backend.checks.get(), 1);
         assert_eq!(backend.installs.get(), 0);
         let state = read_state(&paths.state).unwrap();
-        assert_eq!(state.latest_seen, Some(Version::parse("0.6.1").unwrap()));
+        assert_eq!(state.latest_seen, Some(Version::parse("0.7.1").unwrap()));
         assert_eq!(state.last_success_at, Some(1_000_000));
         assert_eq!(state.last_install_at, None);
     }
@@ -1837,7 +1837,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             state: directory.path().join("state.json"),
             lock: directory.path().join("state.lock"),
         };
-        let backend = FakeBackend::new(Some(candidate("0.6.1")));
+        let backend = FakeBackend::new(Some(candidate("0.7.1")));
 
         periodic_worker_with_context(
             &paths,
@@ -1854,7 +1854,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         assert_eq!(backend.checks.get(), 1);
         assert_eq!(backend.installs.get(), 1);
         let state = read_state(&paths.state).unwrap();
-        assert_eq!(state.latest_seen, Some(Version::parse("0.6.1").unwrap()));
+        assert_eq!(state.latest_seen, Some(Version::parse("0.7.1").unwrap()));
         assert_eq!(state.last_success_at, Some(1_000_000));
         assert_eq!(state.last_install_at, Some(1_000_000));
     }

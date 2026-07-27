@@ -97,6 +97,12 @@ artifact links are generated only from validated relative paths. Screenshots
 may still contain sensitive UI pixels and are not claimed to be redacted or
 automatically safe for public release.
 
+Crawlson 0.7's collection layer does not scrape or trust these persisted
+single-run outputs. It snapshots the raw run without `render/`, calls this same
+renderer against the snapshot and exact journey source, and composes only the
+newly revalidated bytes. See the
+[`guide collection contract`](guide-collection-v1.md).
+
 Schemas are published at
 [`render-report-v1.schema.json`](../../schemas/render-report-v1.schema.json) and
 [`findings-v1.schema.json`](../../schemas/findings-v1.schema.json). Action

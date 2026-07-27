@@ -2,7 +2,7 @@
 # Request coordination with Kanbanlan
 
 This repository uses `github` as its canonical kanban home.
-GitHub Issues currently store requests, and Project 3,
+GitHub Issues currently store requests, and Project 2,
 owned by `jmitchel3`, is their board projection. The repository
 binding is `jmitchel3/crawlson`.
 

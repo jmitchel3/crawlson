@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/guide-collection-v1.schema.json",
+  "title": "Crawlson application guide collection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "crawlson_version", "collection", "topics"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "crawlson_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "manifest_sha256", "snapshot_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/portable_id" },
+        "title": { "$ref": "#/$defs/text" },
+        "description": { "$ref": "#/$defs/text" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "snapshot_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "topics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "$comment": "The producing runtime enforces a collection-wide maximum of 1024 guides across all topics.",
+      "items": { "$ref": "#/$defs/topic" }
+    }
+  },
+  "$defs": {
+    "portable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^(?!(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$))[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9_-])?$"
+    },
+    "journey_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[a-z0-9._-]{1,96}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+(?:/[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+)*$"
+    },
+    "topic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "order", "audience", "index", "guides"],
+      "properties": {
+        "id": { "$ref": "#/$defs/portable_id" },
+        "title": { "$ref": "#/$defs/text" },
+        "description": { "$ref": "#/$defs/text" },
+        "order": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "audience": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+        "index": { "$ref": "#/$defs/path" },
+        "guides": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "$comment": "The sum of guides in every topic is limited to 1024 by the producing runtime.",
+          "items": { "$ref": "#/$defs/guide" }
+        }
+      }
+    },
+    "guide": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "purpose", "expected_outcome", "verification_scope", "order", "topic_id", "topic_title", "audience", "page", "page_size_bytes", "page_sha256", "run_id", "report_sha256", "journey", "steps", "images"],
+      "properties": {
+        "key": { "$ref": "#/$defs/portable_id" },
+        "title": { "$ref": "#/$defs/text" },
+        "purpose": { "$ref": "#/$defs/text" },
+        "expected_outcome": { "$ref": "#/$defs/text" },
+        "verification_scope": { "$ref": "#/$defs/text" },
+        "order": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "topic_id": { "$ref": "#/$defs/portable_id" },
+        "topic_title": { "$ref": "#/$defs/text" },
+        "audience": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+        "page": { "$ref": "#/$defs/path" },
+        "page_size_bytes": { "type": "integer", "minimum": 1 },
+        "page_sha256": { "$ref": "#/$defs/sha256" },
+        "run_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+        "report_sha256": { "$ref": "#/$defs/sha256" },
+        "journey": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "revision", "source_sha256"],
+          "properties": {
+            "id": { "$ref": "#/$defs/journey_id" },
+            "revision": { "type": "integer", "minimum": 1 },
+            "source_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/step" } },
+        "images": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/image" } }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "number", "title", "instruction", "claim_type", "claim", "alt_text", "image"],
+      "properties": {
+        "id": { "$ref": "#/$defs/journey_id" },
+        "number": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "title": { "$ref": "#/$defs/text" },
+        "instruction": { "$ref": "#/$defs/text" },
+        "claim_type": { "enum": ["observed_next_action", "executed_and_verified"] },
+        "claim": { "$ref": "#/$defs/text" },
+        "alt_text": { "$ref": "#/$defs/text" },
+        "image": { "$ref": "#/$defs/image" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

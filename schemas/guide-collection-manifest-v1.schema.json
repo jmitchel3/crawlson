@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/guide-collection-manifest-v1.schema.json",
+  "title": "Crawlson guide collection manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "collection", "topics"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "collection": { "$ref": "#/$defs/collection" },
+    "topics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "$comment": "The runtime additionally enforces a collection-wide maximum of 1024 guides across all topic guide arrays; JSON Schema cannot express that nested aggregate directly.",
+      "items": { "$ref": "#/$defs/topic" }
+    }
+  },
+  "$defs": {
+    "portable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^(?!(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$))[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9_-])?$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+(?:/[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+)*$"
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/portable_id" },
+        "title": { "$ref": "#/$defs/text", "maxLength": 512 },
+        "description": { "$ref": "#/$defs/text" }
+      }
+    },
+    "topic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "order", "audience", "guides"],
+      "properties": {
+        "id": { "$ref": "#/$defs/portable_id" },
+        "title": { "$ref": "#/$defs/text", "maxLength": 512 },
+        "description": { "$ref": "#/$defs/text" },
+        "order": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "audience": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/text", "maxLength": 256 }
+        },
+        "guides": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "$comment": "The sum of guides in every topic is limited to 1024 by the runtime.",
+          "items": { "$ref": "#/$defs/guide" }
+        }
+      }
+    },
+    "guide": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "order", "run", "journey"],
+      "properties": {
+        "key": {
+          "allOf": [
+            { "$ref": "#/$defs/portable_id" },
+            { "not": { "const": "index.md" } }
+          ]
+        },
+        "order": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "run": { "$ref": "#/$defs/relative_path" },
+        "journey": { "$ref": "#/$defs/relative_path" }
+      }
+    }
+  }
+}
