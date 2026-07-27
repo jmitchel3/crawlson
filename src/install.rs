@@ -789,15 +789,23 @@ fn validate_absolute_prefix(prefix: &Path) -> Result<(), InstallFailure> {
     }
     let mut current = PathBuf::new();
     for component in prefix.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+        let inspect = match component {
+            Component::Prefix(_) => {
                 current.push(component.as_os_str());
+                false
+            }
+            Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+                true
             }
             Component::CurDir | Component::ParentDir => {
                 return Err(InstallFailure::blocked(
                     "--prefix must be a normalized absolute directory",
                 ));
             }
+        };
+        if !inspect {
+            continue;
         }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
