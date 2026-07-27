@@ -25,13 +25,14 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 
 ## Phase 0: understand the source system
 
-- [ ] Inventory the Reference Project guide lifecycle: define, authenticate, execute,
+- [x] Inventory the Reference Project guide lifecycle: define, authenticate, execute,
       verify, capture, render, index, and publish.
-- [ ] Trace three representative journeys:
-  - [ ] one read-only workflow;
-  - [ ] one authenticated, role-specific workflow; and
-  - [ ] one mutating workflow with fixture setup and cleanup.
-- [ ] Record what is genuinely reusable versus Reference Project-specific.
+      See [`docs/architecture/reference-project-guide-lifecycle.md`](docs/architecture/reference-project-guide-lifecycle.md).
+- [x] Trace three representative journeys:
+  - [x] one read-only workflow;
+  - [x] one authenticated, role-specific workflow; and
+  - [x] one mutating workflow with fixture setup and cleanup.
+- [x] Record what is genuinely reusable versus Reference Project-specific.
 - [ ] Preserve a few sanitized examples as design fixtures; do not copy secrets,
       production identifiers, or customer data.
 - [ ] Write a short architecture decision describing the chosen MVP language and
