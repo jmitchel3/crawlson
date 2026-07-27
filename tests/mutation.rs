@@ -1,13 +1,21 @@
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Output};
 
+#[cfg(unix)]
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
+#[cfg(unix)]
 use tempfile::TempDir;
 
+#[cfg(unix)]
 const LOOPBACK_ORIGIN: &str = "http://127.0.0.1:4173";
+#[cfg(unix)]
 const REMOTE_ORIGIN: &str = "https://example.test:8443";
+#[cfg(unix)]
 const MUTATION_GRANTS: [&str; 3] = [
     "demo.mutating-pass@1:fill-fixture-name",
     "demo.mutating-pass@1:create-fixture",
@@ -601,6 +609,7 @@ fn run_journey(
     command.output().unwrap()
 }
 
+#[cfg(unix)]
 fn blocked_report(output: &Output, reason: &str) -> Value {
     assert_eq!(
         output.status.code(),
@@ -616,6 +625,7 @@ fn blocked_report(output: &Output, reason: &str) -> Value {
     report
 }
 
+#[cfg(unix)]
 fn success_report(output: &Output) -> Value {
     let report = output_report(output, 0);
     assert_eq!(report["outcome"], "passed");
@@ -623,6 +633,7 @@ fn success_report(output: &Output) -> Value {
     report
 }
 
+#[cfg(unix)]
 fn error_report(output: &Output, reason: &str) -> Value {
     let report = output_report(output, 4);
     assert_eq!(report["outcome"], "error");
@@ -630,6 +641,7 @@ fn error_report(output: &Output, reason: &str) -> Value {
     report
 }
 
+#[cfg(unix)]
 fn output_report(output: &Output, exit_code: i32) -> Value {
     assert_eq!(
         output.status.code(),
@@ -654,6 +666,7 @@ fn render_journey(run_directory: &Path, journey: &Path) -> Output {
         .unwrap()
 }
 
+#[cfg(unix)]
 fn assert_v4_report(report: &Value) {
     assert_eq!(report["schema_version"], 4);
     validate_schema(include_str!("../schemas/run-report-v4.schema.json"), report);
@@ -670,6 +683,7 @@ fn validate_schema(source: &str, instance: &Value) {
     }
 }
 
+#[cfg(unix)]
 fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
@@ -703,6 +717,7 @@ fn write_auth_state(directory: &Path, name: &str, value: &str, origin: &str) -> 
     path
 }
 
+#[cfg(unix)]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
