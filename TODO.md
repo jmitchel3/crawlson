@@ -138,8 +138,10 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Replay a previously successful journey and explain meaningful differences.
 - [ ] Distinguish expected UI evolution from a broken user outcome.
 - [x] Define stable exit-code behavior for local use and CI.
-- [ ] Publish a CI example that cannot turn missing credentials into green.
-- [ ] Upload reports and evidence even when a run fails.
+- [x] Publish a CI example that cannot turn missing authorization into green;
+      authenticated journeys remain explicitly blocked until an authentication
+      adapter exists.
+- [x] Upload reports and evidence even when the required real-browser job fails.
 - [ ] Add a pull-request summary adapter only after the local workflow is sound.
 - [ ] Keep PR execution, scheduled staging runs, and interactive local runs as
       adapters around the same core.
@@ -150,15 +152,17 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Reserve appropriate package and repository namespaces.
 - [ ] Add contribution, security, and responsible-testing guidance.
 - [ ] Document supported targets and the authorization model prominently.
-- [ ] Provide a self-contained demo application and journeys that require no
+- [x] Provide a self-contained demo application and journeys that require no
       third-party credentials.
 - [ ] Add unit tests for schema and safety policy plus end-to-end tests for pass,
       fail, blocked, error, mutation denial, and cleanup failure.
   - [x] Cover the read-only pass/fail/blocked/error and cleanup contracts with a
-        fake process and an opt-in real agent-browser loopback fixture.
+        fake process and a required-in-CI real agent-browser loopback fixture.
   - [ ] Add mutation-denial coverage when a mutation contract exists.
-- [ ] Publish only after a clean install can run the demo and reproduce the
+- [x] Prove that a clean source build can run the demo and reproduce the
       documented artifacts.
+- [ ] Publish signed installers only after a clean installed release can run the
+      demo and reproduce the documented artifacts.
 
 ## Decisions to make deliberately
 

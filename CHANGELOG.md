@@ -6,6 +6,22 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-27
+
+### Added
+
+- A loopback-only, credential-free `crawlson-demo` application with stable,
+  accessible visible UI and read-only HTTP routes.
+- Passing and intentionally failing journey v2 examples that drive the same
+  real browser, evidence, finding, and guide pipeline used for external targets.
+- `scripts/demo.sh`, a one-command complete demonstration that verifies passed,
+  failed, and preflight-blocked outcomes without overwriting prior evidence.
+- A required Linux CI gate for `agent-browser 0.26.0`, including raw and focused
+  screenshot pixel checks, trace and digest validation, guide links, findings,
+  graceful demo shutdown, and always-uploaded diagnostic artifacts.
+- Documentation for the demo's loopback safety boundary, inspectable artifacts,
+  portable-test opt-out, and explicit real-browser test invocation.
+
 ## [0.3.0] - 2026-07-27
 
 ### Added

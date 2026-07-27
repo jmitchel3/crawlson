@@ -77,12 +77,13 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-Early development. The Rust 0.3.0 CLI can run one explicitly authorized,
-deterministic read-only journey through `agent-browser`, retain raw evidence,
-render focused action images, and turn a completed run into either a verified
-guide or evidence-backed deterministic findings. Autonomous agent exploration,
-authentication execution, mutations, and model-judged observations remain
-later vertical slices.
+The Rust 0.4.0 CLI provides the first independently useful read-only vertical
+slice. It can run an explicitly authorized journey through `agent-browser`,
+retain raw evidence, render focused action images, and turn a completed run
+into either a verified guide or evidence-backed deterministic findings. The
+repository includes a credential-free demo of that complete loop. Autonomous
+agent exploration, authentication execution, mutations, and model-judged
+observations remain later vertical slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
@@ -105,6 +106,52 @@ so `clson doctor` and `clson upgrade` have the same behavior.
 `doctor` checks for a supported `agent-browser` without installing or changing
 it. Pass `--json` for one machine-readable object on stdout. Operational
 failures exit 1 and argument errors exit 2.
+
+### Complete local demo
+
+The fastest way to see the product loop is the self-contained loopback demo. It
+requires Rust 1.92 and `agent-browser 0.26.x` with its browser runtime. One
+supported installation path is:
+
+```console
+npm install --global --ignore-scripts agent-browser@0.26.0
+agent-browser install
+```
+
+From the repository root, choose a new or empty artifact directory and run:
+
+```console
+scripts/demo.sh --output-dir ./crawlson-demo-output
+```
+
+The script builds Crawlson, starts a read-only loopback application, and runs
+three cases through the real browser adapter:
+
+- a passing journey that renders a Markdown guide;
+- an intentional visible-text failure that renders JSON and Markdown findings;
+  and
+- a missing-authorization attempt that is blocked before browser launch.
+
+The command exits successfully only when all three produce their expected
+outcomes. It prints the guide and findings paths and preserves the JSON reports,
+raw viewport screenshots, red-box/dimmed focused screenshots, focus metadata,
+browser traces, and command logs. It refuses a non-empty output directory so a
+new run cannot overwrite earlier evidence.
+
+`cargo test --workspace --all-targets --all-features --locked` keeps the real
+browser integration ignored so the portable suite does not silently depend on
+a local browser installation. To explicitly require the full integration, run:
+
+```console
+CRAWLSON_REAL_BROWSER=required \
+  cargo test --test real_agent_browser --locked -- --ignored --nocapture
+```
+
+Set `AGENT_BROWSER_REAL_BIN` to an absolute executable path when
+`agent-browser` is not on `PATH`. The required CI job runs this integration and
+the documented demo, then uploads their reports, evidence, and logs even when a
+step fails. See the [demo contract](docs/architecture/demo-v1.md) for its safety
+and artifact guarantees.
 
 ### Read-only journeys
 

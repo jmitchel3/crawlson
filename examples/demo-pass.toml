@@ -1,0 +1,33 @@
+schema_version = 2
+
+[journey]
+id = "demo.complete-pass"
+revision = 1
+title = "Complete the Crawlson demo"
+purpose = "Verify the self-contained demo through the same visible UI and evidence path used for real targets."
+expected_outcome = "The welcome message and Continue action are visible."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-demo"
+title = "Open the local demo"
+action = { type = "navigate", path = "/" }
+
+[[steps]]
+id = "confirm-heading"
+title = "Confirm the welcome message"
+action = { type = "check_text", selector = "#welcome-heading", expected = "Welcome to the Crawlson demo", comparison = "exact" }
+
+[[steps]]
+id = "capture-action"
+title = "Find the Continue action"
+guide_instruction = "Review the highlighted Continue action."
+evidence_for = ["confirm-heading"]
+action = { type = "capture", selector = "#action-button", alt_text = "Continue action highlighted in red" }

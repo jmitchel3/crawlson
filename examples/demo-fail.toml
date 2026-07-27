@@ -1,0 +1,32 @@
+schema_version = 2
+
+[journey]
+id = "demo.intentional-failure"
+revision = 1
+title = "Expose an intentional demo mismatch"
+purpose = "Prove that an observable UI mismatch becomes an evidence-backed finding rather than a false-green pass."
+expected_outcome = "The deliberately incorrect heading checkpoint fails and retains focused evidence."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-demo"
+title = "Open the local demo"
+action = { type = "navigate", path = "/" }
+
+[[steps]]
+id = "confirm-heading"
+title = "Check the intentionally incorrect welcome message"
+action = { type = "check_text", selector = "#welcome-heading", expected = "Welcome to the broken demo", comparison = "exact" }
+
+[[steps]]
+id = "capture-action"
+title = "Capture evidence around the Continue action"
+evidence_for = ["confirm-heading"]
+action = { type = "capture", selector = "#action-button", alt_text = "Continue action highlighted in red" }
