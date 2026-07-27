@@ -1,4 +1,5 @@
 mod cli;
+pub mod collection;
 pub mod doctor;
 pub mod driver;
 pub mod focus;

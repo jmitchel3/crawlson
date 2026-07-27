@@ -5,7 +5,7 @@
 
 The canonical kanban home is `github`. GitHub Issues currently
 store canonical requests, and [jmitchel3 Project
-3](https://github.com/users/jmitchel3/projects/3) is their projection. Repository policy
+2](https://github.com/users/jmitchel3/projects/2) is their projection. Repository policy
 and durable delivery records remain versioned here. Follow
 `docs/workflow/kanbanlan.md`.
 

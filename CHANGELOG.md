@@ -6,6 +6,34 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-27
+
+### Added
+
+- Strict guide-collection manifest, application document, and collection-report
+  v1 contracts for composing verified runs into deterministic Markdown wikis.
+- A neutral ordered guide-step model with audience/topic context and explicit
+  page, image, journey, run, report, manifest, and snapshot digest bindings.
+- Equivalent `crawlson guides build/check` and `clson guides build/check`
+  workflows with root/topic navigation, byte-identical focused images, separate
+  findings review output, stable status/exit semantics, and no browser launch.
+- A read-only collection audit for stale or changed files, dead links, orphaned
+  images, missing index reachability, unexpected files, and symlinks.
+- Complete demo coverage that builds and checks a two-guide public collection
+  and a separate two-finding review collection from real browser runs.
+
+### Security
+
+- Collection generation ignores prior run render output, snapshots bounded raw
+  inputs, and reuses the strict offline renderer for journey, authorization,
+  cleanup, artifact, focus-sidecar, and provenance validation.
+- Collection-wide resource budgets are enforced before byte retention or
+  staging, portable paths reject cross-platform aliases, and supported systems
+  commit new trees with a kernel-enforced no-replace rename.
+- Public guide output is all-or-nothing. A failed, blocked, unavailable,
+  incomplete, or tampered current entry cannot leave a partial collection that
+  claims to be publishable, and conflicting output is never overwritten.
+
 ## [0.6.0] - 2026-07-27
 
 ### Added

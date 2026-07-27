@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/guide-collection-report-v1.schema.json",
+  "title": "Crawlson guide collection report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "crawlson_version", "status", "publishable", "summary", "entries", "diagnostics", "outputs"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "crawlson_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "status": { "enum": ["ready", "findings", "not_publishable", "error"] },
+    "publishable": { "type": "boolean" },
+    "collection": { "$ref": "#/$defs/collection" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "entries": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "outputs": {
+      "type": "array",
+      "maxItems": 8192,
+      "items": { "$ref": "#/$defs/output" }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "ready" },
+        "publishable": { "const": true },
+        "diagnostics": { "maxItems": 0 },
+        "summary": {
+          "properties": {
+            "guides": { "minimum": 1 },
+            "findings": { "const": 0 },
+            "unavailable": { "const": 0 },
+            "errors": { "const": 0 }
+          }
+        },
+        "outputs": {
+          "minItems": 3,
+          "contains": { "properties": { "path": { "const": "index.md" } }, "required": ["path"] },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      },
+      "required": ["collection"]
+    },
+    {
+      "properties": {
+        "status": { "const": "findings" },
+        "publishable": { "const": false },
+        "summary": {
+          "properties": {
+            "findings": { "minimum": 1 },
+            "unavailable": { "const": 0 },
+            "errors": { "const": 0 }
+          }
+        },
+        "diagnostics": {
+          "contains": { "properties": { "code": { "const": "findings_present" } }, "required": ["code"] }
+        }
+      },
+      "required": ["collection"]
+    },
+    {
+      "properties": {
+        "status": { "const": "not_publishable" },
+        "publishable": { "const": false }
+      },
+      "required": ["collection"]
+    },
+    {
+      "properties": {
+        "status": { "const": "error" },
+        "publishable": { "const": false },
+        "summary": { "properties": { "errors": { "minimum": 1 } } },
+        "diagnostics": { "minItems": 1 },
+        "outputs": { "maxItems": 0 }
+      }
+    }
+  ],
+  "$defs": {
+    "portable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^(?!(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$))[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9_-])?$"
+    },
+    "journey_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[a-z0-9._-]{1,96}$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "safe_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+(?:/[^/\\\\<>:\\u0022|?*\\u0000-\\u001f\\u007f-\\u009f]+)*$"
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "manifest_sha256", "snapshot_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/portable_id" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "snapshot_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guides", "findings", "unavailable", "errors"],
+      "properties": {
+        "guides": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "topic_id", "status", "journey", "reason_code", "guide_steps", "findings"],
+      "properties": {
+        "key": { "$ref": "#/$defs/portable_id" },
+        "topic_id": { "$ref": "#/$defs/portable_id" },
+        "status": { "enum": ["guide_ready", "findings_ready", "not_publishable", "error"] },
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$" },
+        "report_sha256": { "$ref": "#/$defs/sha256" },
+        "journey": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "revision", "source_sha256"],
+          "properties": {
+            "id": { "$ref": "#/$defs/journey_id" },
+            "revision": { "type": "integer", "minimum": 1 },
+            "source_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "reason_code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "guide_steps": { "type": "integer", "minimum": 0 },
+        "findings": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "$ref": "#/$defs/text" },
+        "entry": { "$ref": "#/$defs/portable_id" },
+        "path": { "$ref": "#/$defs/safe_path" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "size_bytes", "media_type", "sha256"],
+      "properties": {
+        "kind": { "enum": ["index", "collection", "findings_json", "findings_markdown", "focused_image", "evidence_json", "evidence"] },
+        "path": { "$ref": "#/$defs/safe_path" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "media_type": { "enum": ["text/markdown", "application/json", "image/png", "application/octet-stream"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "topic_id": { "$ref": "#/$defs/portable_id" },
+        "entry": { "$ref": "#/$defs/portable_id" },
+        "journey_id": { "$ref": "#/$defs/journey_id" },
+        "report_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
+use crate::collection::{self, CollectionMode, CollectionOptions};
 use crate::doctor::{self, DoctorOptions};
 use crate::install::{self, InstallOptions};
 use crate::render::{self, RenderOptions};
@@ -46,6 +47,9 @@ enum Commands {
 
     /// Render findings or a guide from one completed, verified run.
     Render(RenderArgs),
+
+    /// Build or check a deterministic collection of verified guides.
+    Guides(GuidesArgs),
 
     /// Internal isolated worker for periodic update checks.
     #[command(name = "__update-worker", hide = true)]
@@ -133,6 +137,32 @@ struct RenderArgs {
     journey: PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct GuidesArgs {
+    #[command(subcommand)]
+    command: GuidesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum GuidesCommand {
+    /// Build a new collection, or accept an identical existing collection.
+    Build(CollectionArgs),
+
+    /// Check an existing collection without rewriting it.
+    Check(CollectionArgs),
+}
+
+#[derive(Debug, Args)]
+struct CollectionArgs {
+    /// Versioned collection manifest containing portable run and journey paths.
+    #[arg(value_name = "MANIFEST")]
+    manifest: PathBuf,
+
+    /// Collection directory to create or check.
+    #[arg(long, value_name = "DIRECTORY", required = true)]
+    output: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 struct VersionReport<'a> {
     schema_version: u8,
@@ -204,6 +234,22 @@ where
             });
             let mut rendered = report.render(cli.json);
             update::finish_foreground(&mut rendered, !cli.json);
+            rendered
+        }
+        Commands::Guides(args) => {
+            let (mode, args, allow_periodic_update) = match args.command {
+                GuidesCommand::Build(args) => (CollectionMode::Build, args, true),
+                GuidesCommand::Check(args) => (CollectionMode::Check, args, false),
+            };
+            let report = collection::run(CollectionOptions {
+                manifest_path: args.manifest,
+                output_directory: args.output,
+                mode,
+            });
+            let mut rendered = report.render(cli.json);
+            if allow_periodic_update {
+                update::finish_foreground(&mut rendered, !cli.json);
+            }
             rendered
         }
         Commands::UpdateWorker => update::run_periodic_worker(),

@@ -78,14 +78,16 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.6.0 CLI provides the first independently useful action-capable
-vertical slice. It can run an explicitly authorized journey through
+The Rust 0.7.0 CLI provides an independently useful action-and-guide vertical
+slice. It can run an explicitly authorized journey through
 `agent-browser`, retain raw evidence, follow and verify a declared same-origin
 link, render focused action images, and turn a completed run into either a
-verified guide or evidence-backed deterministic findings. The repository
-includes a credential-free demo of that complete loop and a non-publishing
-release path for validating bundles and managed installation. No public 0.6.0
-release exists yet: license selection, namespace reservation,
+verified guide or evidence-backed deterministic findings. Multiple verified
+runs can be compiled into a deterministic, navigable Markdown guide collection
+with a separate findings review tree and read-only integrity audit. The
+repository includes a credential-free demo of that complete loop and a
+non-publishing release path for validating bundles and managed installation. No
+public 0.7.0 release exists yet: license selection, namespace reservation,
 and production signing-key custody remain owner decisions. Autonomous agent
 exploration, authentication execution, mutations, and model-judged observations
 remain later vertical slices.
@@ -105,15 +107,19 @@ cargo build --locked --bins
   --allow-action demo.follow-link-pass@1:follow-continue
 ./target/debug/crawlson render crawlson-runs/RUN_ID \
   --journey examples/follow-link-pass.toml
+./target/debug/crawlson --json guides build ./crawlson-guides.toml \
+  --output ./guide-site
+./target/debug/crawlson --json guides check ./crawlson-guides.toml \
+  --output ./guide-site
 ```
 
 `crawlson` is the canonical executable. `clson` is a small launcher that
 forwards every argument and exit status to the sibling `crawlson` executable,
-so `clson doctor` and `clson upgrade` have the same behavior.
+so `clson doctor`, `clson guides`, and `clson upgrade` have the same behavior.
 
 ### Release bundles and managed installation
 
-Crawlson 0.6.0 defines deterministic bundles for four targets: Apple Silicon
+Crawlson 0.7.0 defines deterministic bundles for four targets: Apple Silicon
 macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
 the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
 script and journey fixtures. The demo stays in the extracted bundle; managed
@@ -184,7 +190,7 @@ scripts/demo.sh \
 ```
 
 Both forms start the loopback application and run six cases through the real
-browser adapter:
+browser adapter, then compile and check the resulting guide collections:
 
 - a passing journey that renders a Markdown guide;
 - an intentional visible-text failure that renders JSON and Markdown findings,
@@ -194,11 +200,17 @@ browser adapter:
 - an action whose exact postcondition fails and is rendered as a finding; and
 - a missing-action-authorization attempt that is blocked before browser launch.
 
+The two successful journeys become one root/topic/guide Markdown tree with
+byte-identical red-box/dimmed focused images. The two deterministic failures
+become a separate linked review tree; that tree deliberately has no public root
+guide index. Both trees are checked again without rewriting them.
+
 The command exits successfully only when all six produce their expected
-outcomes. It prints the guide and findings paths and preserves the JSON reports,
-raw viewport screenshots, red-box/dimmed focused screenshots, focus metadata,
-browser traces, and command logs. It refuses a non-empty output directory so a
-new run cannot overwrite earlier evidence.
+outcomes. It prints the guide, findings, collection, and review paths and
+preserves the JSON reports, raw viewport screenshots, red-box/dimmed focused
+screenshots, focus metadata, browser traces, command logs, collection manifests,
+guide indexes, and finding review indexes. It refuses a non-empty output
+directory so a new run cannot overwrite earlier evidence.
 
 `cargo test --workspace --all-targets --all-features --locked` keeps the real
 browser integration ignored so the portable suite does not silently depend on
@@ -339,6 +351,42 @@ Artifact hashing establishes consistency with the local run report, not
 cryptographic authenticity: a party able to replace the whole unsigned bundle
 could replace its hashes too. Focused screenshots can contain sensitive pixels;
 Crawlson does not describe them as redacted or automatically publish-safe.
+
+### Guide collections
+
+`crawlson guides build MANIFEST --output DIRECTORY` compiles explicitly ordered
+topics and entries into one offline wiki tree. Every manifest run/journey path
+must be portable and relative to the manifest. Crawlson rejects escapes,
+symlinks, duplicate identities, ambiguous ordering, and overlapping input/output
+roots before generation.
+
+Collection builds do not trust or mutate an input run's prior `render/`
+directory. Each raw run is copied into a bounded temporary snapshot and passed
+through the normal offline renderer with its exact journey source. Only when
+every entry is `guide_ready` does Crawlson emit a public `index.md`, topic
+indexes, navigable per-guide pages, byte-identical focused images, and the
+versioned `guide-collection.json` application boundary. That neutral document
+contains ordered instructions, honest observed-versus-executed claims,
+topic/audience context, and page/image provenance, so another application can
+render the guide without parsing Markdown.
+
+If any current run has deterministic findings, is blocked, or is unavailable,
+Crawlson emits no partial public index. A separate `review/index.md` records the
+current state; findings retain their structured document and linked evidence.
+The overall exit is 1 for findings, 3 for unavailable entries, and 4 for invalid
+or tampered inputs.
+
+`crawlson guides check MANIFEST --output DIRECTORY` recomputes the expected tree
+and reads the existing output without rewriting it or starting periodic updater
+work. It reports stale or missing
+files, dead local links, orphaned images, missing index reachability, unexpected
+files, digest changes, and symlinks with stable codes. A build accepts identical
+output as a no-op and preserves/rejects conflicting output; v1 has no destructive
+overwrite flag. See the
+[`guide collection contract`](docs/architecture/guide-collection-v1.md),
+[`manifest schema`](schemas/guide-collection-manifest-v1.schema.json),
+[`application schema`](schemas/guide-collection-v1.schema.json), and
+[`collection report schema`](schemas/guide-collection-report-v1.schema.json).
 
 ### Updates
 

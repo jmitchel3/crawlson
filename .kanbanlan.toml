@@ -15,7 +15,7 @@ production_branch = ""
 [project]
 owner = "jmitchel3"
 owner_type = "user"
-number = 3
+number = 2
 
 [local]
 stale_seconds = 180

@@ -246,6 +246,83 @@ expect_exit 3 "$output_dir/action-blocked-run.json" "$output_dir/action-blocked-
   "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
+journeys_dir="$output_dir/journeys"
+mkdir -p "$journeys_dir"
+cp "$repo_root/examples/demo-pass.toml" "$journeys_dir/demo-pass.toml"
+cp "$repo_root/examples/demo-fail.toml" "$journeys_dir/demo-fail.toml"
+cp "$repo_root/examples/follow-link-pass.toml" "$journeys_dir/follow-link-pass.toml"
+cp "$repo_root/examples/follow-link-fail.toml" "$journeys_dir/follow-link-fail.toml"
+
+cat >"$output_dir/guide-collection.toml" <<EOF
+schema_version = 1
+
+[collection]
+id = "crawlson-demo-help"
+title = "Crawlson Demo Help"
+description = "Verified workflows produced by the self-contained demo."
+
+[[topics]]
+id = "getting-started"
+title = "Getting started"
+description = "Complete the demo through its visible interface."
+order = 10
+audience = ["visitors"]
+
+[[topics.guides]]
+key = "review-continue"
+order = 10
+run = "runs/$(basename "$pass_run_dir")"
+journey = "journeys/demo-pass.toml"
+
+[[topics.guides]]
+key = "follow-continue"
+order = 20
+run = "runs/$(basename "$action_pass_run_dir")"
+journey = "journeys/follow-link-pass.toml"
+EOF
+
+expect_exit 0 "$output_dir/collection-build.json" "$output_dir/collection-build.stderr" \
+  "$crawlson_bin" --json guides build "$output_dir/guide-collection.toml" \
+  --output "$output_dir/guide-site"
+expect_exit 0 "$output_dir/collection-check.json" "$output_dir/collection-check.stderr" \
+  "$crawlson_bin" --json guides check "$output_dir/guide-collection.toml" \
+  --output "$output_dir/guide-site"
+
+cat >"$output_dir/finding-collection.toml" <<EOF
+schema_version = 1
+
+[collection]
+id = "crawlson-demo-review"
+title = "Crawlson Demo Findings"
+description = "Deterministic failures retained for review."
+
+[[topics]]
+id = "known-failures"
+title = "Known failures"
+description = "Intentional fixtures that demonstrate honest bug reporting."
+order = 10
+audience = ["reviewers"]
+
+[[topics.guides]]
+key = "wrong-heading"
+order = 10
+run = "runs/$(basename "$fail_run_dir")"
+journey = "journeys/demo-fail.toml"
+
+[[topics.guides]]
+key = "broken-redirect"
+order = 20
+run = "runs/$(basename "$action_fail_run_dir")"
+journey = "journeys/follow-link-fail.toml"
+EOF
+
+expect_exit 1 "$output_dir/review-build.json" "$output_dir/review-build.stderr" \
+  "$crawlson_bin" --json guides build "$output_dir/finding-collection.toml" \
+  --output "$output_dir/guide-review"
+expect_exit 1 "$output_dir/review-check.json" "$output_dir/review-check.stderr" \
+  "$crawlson_bin" --json guides check "$output_dir/finding-collection.toml" \
+  --output "$output_dir/guide-review"
+
 require_json_fragment "$output_dir/pass-run.json" '"outcome":"passed"' \
   "passing journey outcome"
 require_json_fragment "$output_dir/pass-run.json" '"execution_outcome":"passed"' \
@@ -300,6 +377,18 @@ require_json_fragment "$output_dir/action-blocked-run.json" \
 require_json_fragment "$output_dir/action-blocked-run.json" \
   '"driver":{"name":"agent-browser","commands":[]}' \
   "action preflight empty driver command list"
+require_json_fragment "$output_dir/collection-build.json" '"status":"ready"' \
+  "guide collection build status"
+require_json_fragment "$output_dir/collection-build.json" '"guides":2' \
+  "guide collection guide count"
+cmp -s "$output_dir/collection-build.json" "$output_dir/collection-check.json" \
+  || fail "guide collection build and check reports differ"
+require_json_fragment "$output_dir/review-build.json" '"status":"findings"' \
+  "guide review build status"
+require_json_fragment "$output_dir/review-build.json" '"findings":2' \
+  "guide review finding count"
+cmp -s "$output_dir/review-build.json" "$output_dir/review-check.json" \
+  || fail "guide review build and check reports differ"
 
 for run_dir in "$pass_run_dir" "$fail_run_dir"; do
   require_artifact "$run_dir/report.json"
@@ -335,7 +424,27 @@ require_artifact "$action_fail_run_dir/evidence/003-follow-broken-redirect.focus
 require_json_fragment "$action_fail_run_dir/render/findings.md" \
   'Observed: path /unexpected' "post-action observed path finding"
 
+require_artifact "$output_dir/guide-site/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/review-continue/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/review-continue/001-focused.png"
+require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/001-focused.png"
+cmp -s "$pass_run_dir/evidence/003-capture-action.focused.png" \
+  "$output_dir/guide-site/topics/getting-started/review-continue/001-focused.png" \
+  || fail "collection guide image does not match verified focused evidence"
+cmp -s "$action_pass_run_dir/evidence/002-follow-continue.focused.png" \
+  "$output_dir/guide-site/topics/getting-started/follow-continue/001-focused.png" \
+  || fail "collection action image does not match verified focused evidence"
+require_artifact "$output_dir/guide-review/review/index.md"
+require_artifact "$output_dir/guide-review/review/known-failures/wrong-heading/render/findings.json"
+require_artifact "$output_dir/guide-review/review/known-failures/broken-redirect/render/findings.json"
+[[ ! -e "$output_dir/guide-review/index.md" ]] \
+  || fail "findings collection emitted a partial public guide index"
+
 echo "Crawlson demo passed."
 echo "Artifacts: $output_dir"
 echo "Guide: $pass_run_dir/render/guide.md"
 echo "Findings: $fail_run_dir/render/findings.md"
+echo "Guide collection: $output_dir/guide-site/index.md"
+echo "Guide review: $output_dir/guide-review/review/index.md"
