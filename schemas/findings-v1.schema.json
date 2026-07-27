@@ -1,0 +1,387 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/findings-v1.schema.json",
+  "title": "Crawlson findings v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "journey", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "journey": { "$ref": "#/$defs/journey" },
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "source_sha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "source_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "severity_source",
+        "kind",
+        "symptom",
+        "step",
+        "checkpoint",
+        "reproduction_steps",
+        "evidence"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^finding-[0-9]{3}-[a-z0-9._-]{1,96}$" },
+        "severity": { "const": "untriaged" },
+        "severity_source": { "const": "not_assessed" },
+        "kind": { "enum": ["url_mismatch", "target_not_visible", "text_mismatch"] },
+        "symptom": { "type": "string", "minLength": 1 },
+        "step": { "$ref": "#/$defs/finding_step" },
+        "checkpoint": { "$ref": "#/$defs/checkpoint" },
+        "reproduction_steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/reproduction_step" }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/evidence" },
+          "allOf": [
+            {
+              "contains": {
+                "properties": { "kind": { "const": "run_report" } },
+                "required": ["kind"]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": { "kind": { "const": "trace" } },
+                "required": ["kind"]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "if": {
+                "contains": {
+                  "properties": {
+                    "kind": {
+                      "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata"]
+                    }
+                  },
+                  "required": ["kind"]
+                }
+              },
+              "then": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "properties": { "kind": { "const": "raw_screenshot" } },
+                      "required": ["kind"]
+                    }
+                  },
+                  {
+                    "contains": {
+                      "properties": { "kind": { "const": "focused_screenshot" } },
+                      "required": ["kind"]
+                    }
+                  },
+                  {
+                    "contains": {
+                      "properties": { "kind": { "const": "focus_metadata" } },
+                      "required": ["kind"]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": { "const": "url_mismatch" },
+                "checkpoint": { "$ref": "#/$defs/url_checkpoint" }
+              }
+            },
+            {
+              "properties": {
+                "kind": { "const": "target_not_visible" },
+                "checkpoint": { "$ref": "#/$defs/target_not_visible_checkpoint" }
+              }
+            },
+            {
+              "properties": {
+                "kind": { "const": "text_mismatch" },
+                "checkpoint": { "$ref": "#/$defs/text_mismatch_checkpoint" }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "finding_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "title"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "title": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected"],
+      "properties": {
+        "expected": { "type": "string" },
+        "comparison": { "enum": ["exact", "contains"] },
+        "observed_path": { "type": "string", "minLength": 1 },
+        "visible": { "type": "boolean" },
+        "matched": { "type": "boolean" },
+        "observed_text_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "url_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        {
+          "required": ["expected", "comparison", "observed_path", "matched"],
+          "properties": {
+            "expected": { "type": "string", "pattern": "^/(?!/)[^?#]*$" },
+            "comparison": { "const": "exact" },
+            "observed_path": { "type": "string", "pattern": "^/(?!/)[^?#]*$" },
+            "matched": { "const": false }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["visible"] },
+              { "required": ["observed_text_sha256"] }
+            ]
+          }
+        }
+      ]
+    },
+    "target_not_visible_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        {
+          "required": ["expected", "comparison", "visible"],
+          "properties": {
+            "expected": { "type": "string", "minLength": 1 },
+            "visible": { "const": false }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["observed_path"] },
+              { "required": ["matched"] },
+              { "required": ["observed_text_sha256"] }
+            ]
+          }
+        }
+      ]
+    },
+    "text_mismatch_checkpoint": {
+      "allOf": [
+        { "$ref": "#/$defs/checkpoint" },
+        {
+          "required": [
+            "expected",
+            "comparison",
+            "visible",
+            "matched",
+            "observed_text_sha256"
+          ],
+          "properties": {
+            "expected": { "type": "string", "minLength": 1 },
+            "visible": { "const": true },
+            "matched": { "const": false }
+          },
+          "not": { "required": ["observed_path"] }
+        }
+      ]
+    },
+    "reproduction_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "title", "kind", "status", "action"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["navigate", "check_url", "check_text", "capture"] },
+        "status": { "enum": ["passed", "failed"] },
+        "action": { "$ref": "#/$defs/action" }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": { "const": "navigate" },
+                "action": {
+                  "properties": { "type": { "const": "navigate" } },
+                  "required": ["type"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "kind": { "const": "check_url" },
+                "action": {
+                  "properties": { "type": { "const": "check_url" } },
+                  "required": ["type"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "kind": { "const": "check_text" },
+                "action": {
+                  "properties": { "type": { "const": "check_text" } },
+                  "required": ["type"]
+                }
+              }
+            },
+            {
+              "properties": {
+                "kind": { "const": "capture" },
+                "action": {
+                  "properties": { "type": { "const": "capture" } },
+                  "required": ["type"]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "navigate" },
+            "path": { "type": "string", "pattern": "^/(?!/)[^?#]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "check_url" },
+            "path": { "type": "string", "pattern": "^/(?!/)[^?#]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "selector", "expected", "comparison"],
+          "properties": {
+            "type": { "const": "check_text" },
+            "selector": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "expected": { "type": "string", "minLength": 1, "maxLength": 65536 },
+            "comparison": { "enum": ["exact", "contains"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "selector"],
+          "properties": {
+            "type": { "const": "capture" },
+            "selector": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path", "sha256"],
+          "properties": {
+            "kind": { "const": "run_report" },
+            "path": { "const": "report.json" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path", "sha256"],
+          "properties": {
+            "kind": { "const": "trace" },
+            "path": { "const": "evidence/trace.json" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        {
+          "$ref": "#/$defs/raw_screenshot_evidence"
+        },
+        {
+          "$ref": "#/$defs/focused_screenshot_evidence"
+        },
+        {
+          "$ref": "#/$defs/focus_metadata_evidence"
+        }
+      ]
+    },
+    "raw_screenshot_evidence": {
+      "$ref": "#/$defs/associated_evidence",
+      "properties": {
+        "kind": { "const": "raw_screenshot" },
+        "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.raw\\.png$" }
+      }
+    },
+    "focused_screenshot_evidence": {
+      "$ref": "#/$defs/associated_evidence",
+      "properties": {
+        "kind": { "const": "focused_screenshot" },
+        "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.focused\\.png$" }
+      }
+    },
+    "focus_metadata_evidence": {
+      "$ref": "#/$defs/associated_evidence",
+      "properties": {
+        "kind": { "const": "focus_metadata" },
+        "path": { "type": "string", "pattern": "^evidence/[0-9]{3}-[a-z0-9._-]{1,96}\\.focused\\.json$" }
+      }
+    },
+    "associated_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256", "capture_step_id", "association_source"],
+      "properties": {
+        "kind": { "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata"] },
+        "path": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "capture_step_id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "association_source": { "const": "journey.evidence_for" }
+      }
+    }
+  }
+}

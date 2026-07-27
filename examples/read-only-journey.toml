@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 
 [journey]
 id = "demo.read-home"
@@ -33,5 +33,5 @@ action = { type = "check_text", selector = "h1", expected = "Welcome", compariso
 [[steps]]
 id = "capture-primary-action"
 title = "Find the primary action"
-guide_instruction = "Use the highlighted primary action to continue."
+guide_instruction = "Locate the highlighted primary action before continuing."
 action = { type = "capture", selector = "#primary-action", alt_text = "The primary action is highlighted for the next step." }

@@ -6,6 +6,25 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-27
+
+### Added
+
+- Offline `crawlson render` and equivalent `clson render` over completed run
+  evidence, with strict journey provenance and full artifact re-verification.
+- Deterministic Markdown guides built only from passed capture steps with
+  verified focused images and authored guide instructions.
+- Versioned deterministic JSON and Markdown findings for failed URL and visible
+  text checkpoints, including untriaged severity, executed reproduction steps,
+  report/trace evidence, and explicitly associated focused screenshots.
+- Backward-compatible journey v2, adding optional `evidence_for` links from
+  capture steps to unique earlier checkpoints, preventing screenshot provenance
+  from being inferred by timing.
+- Atomic, idempotent renderer-owned output and explicit blocked, error,
+  incomplete, drift, tamper, missing-artifact, and path-escape results.
+- Published render-report and findings JSON Schemas plus pass/fail/blocked,
+  alias-parity, determinism, move, drift, tamper, and symlink safety coverage.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

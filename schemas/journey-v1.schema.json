@@ -72,7 +72,7 @@
           "minLength": 1
         }
       },
-      "description": "Declares a requirement without embedding secrets. Version 0.2 reports such journeys as blocked until an authentication adapter is configured."
+      "description": "Declares a requirement without embedding secrets. Journey v1 reports such journeys as blocked until an authentication adapter is configured."
     },
     "evidence": {
       "type": "object",

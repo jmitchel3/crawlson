@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::doctor::{self, DoctorOptions};
+use crate::render::{self, RenderOptions};
 use crate::runner::{self, RunOptions};
 use crate::update::{self, ManualUpgradeOptions};
 use crate::{CommandResult, VERSION};
@@ -38,6 +39,9 @@ enum Commands {
 
     /// Run one validated, explicitly authorized read-only journey.
     Run(RunArgs),
+
+    /// Render findings or a guide from one completed, verified run.
+    Render(RenderArgs),
 
     /// Internal isolated worker for periodic update checks.
     #[command(name = "__update-worker", hide = true)]
@@ -99,6 +103,17 @@ struct RunArgs {
     run_timeout_seconds: u64,
 }
 
+#[derive(Debug, Args)]
+struct RenderArgs {
+    /// Completed Crawlson run directory containing report.json and evidence.
+    #[arg(value_name = "RUN_DIRECTORY")]
+    run_directory: PathBuf,
+
+    /// Exact journey source used by the completed run.
+    #[arg(long, value_name = "JOURNEY", required = true)]
+    journey: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 struct VersionReport<'a> {
     schema_version: u8,
@@ -152,6 +167,15 @@ where
                 agent_browser: args.agent_browser,
                 action_timeout: std::time::Duration::from_secs(args.action_timeout_seconds),
                 run_timeout: std::time::Duration::from_secs(args.run_timeout_seconds),
+            });
+            let mut rendered = report.render(cli.json);
+            update::finish_foreground(&mut rendered, !cli.json);
+            rendered
+        }
+        Commands::Render(args) => {
+            let report = render::run(RenderOptions {
+                run_directory: args.run_directory,
+                journey_path: args.journey,
             });
             let mut rendered = report.render(cli.json);
             update::finish_foreground(&mut rendered, !cli.json);

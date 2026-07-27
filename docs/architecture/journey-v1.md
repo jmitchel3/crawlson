@@ -114,3 +114,9 @@ finalization or cleanup later changes the final outcome/reason to `error`.
 Driver command `upstream_success` records only generic envelope acceptance;
 capability validation and the enclosing step/run outcome remain authoritative.
 Missing authentication and cleanup failures can never become a green result.
+
+Offline rendering of this contract is specified in
+[`render-v1.md`](render-v1.md). Package 0.3 continues to read journey v1 without
+changing its schema and adds the backward-compatible authoring contract in
+[`journey-v2.md`](journey-v2.md). Package and document versions advance
+independently.

@@ -288,7 +288,7 @@ pub fn run(options: RunOptions) -> RunReport {
         finish_blocked(
             &mut report,
             "authentication_unavailable",
-            "this journey requires authentication, which is not available in the read-only 0.2 schema"
+            "this journey requires authentication, which is not available in read-only journey v1"
                 .to_owned(),
         );
         return finalize(report, overall_start, &run_root);
@@ -1081,6 +1081,7 @@ mod tests {
                     id: "open".to_owned(),
                     title: "Open".to_owned(),
                     guide_instruction: None,
+                    evidence_for: Vec::new(),
                     action: ValidatedAction::Navigate {
                         url: Url::parse("http://127.0.0.1:4173/").unwrap(),
                     },
@@ -1089,6 +1090,7 @@ mod tests {
                     id: "check".to_owned(),
                     title: "Check".to_owned(),
                     guide_instruction: None,
+                    evidence_for: Vec::new(),
                     action: ValidatedAction::CheckText {
                         selector: "h1".to_owned(),
                         expected: expected.to_owned(),

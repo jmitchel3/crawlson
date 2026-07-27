@@ -72,16 +72,17 @@ contracts are deliberately narrow and read-only. See
 for the runtime comparison, adapter lifecycle, safety ownership, and exact
 fallback criteria.
 
-The first design task is to reduce the existing Reference Project guide
-workflow to the smallest useful, application-independent core.
+The Reference Project inventory has been reduced to an
+application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-Early development. The Rust 0.2.0 CLI can run one explicitly authorized,
+Early development. The Rust 0.3.0 CLI can run one explicitly authorized,
 deterministic read-only journey through `agent-browser`, retain raw evidence,
-and render focused action images. Autonomous agent exploration, authentication
-execution, mutations, findings, and generated Markdown guides remain later
-vertical slices.
+render focused action images, and turn a completed run into either a verified
+guide or evidence-backed deterministic findings. Autonomous agent exploration,
+authentication execution, mutations, and model-judged observations remain
+later vertical slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
@@ -93,6 +94,8 @@ cargo build --bins
 ./target/debug/crawlson upgrade --check
 ./target/debug/crawlson --json run examples/read-only-journey.toml \
   --allow-origin http://127.0.0.1:4173
+./target/debug/crawlson render crawlson-runs/RUN_ID \
+  --journey examples/read-only-journey.toml
 ```
 
 `crawlson` is the canonical executable. `clson` is a small launcher that
@@ -105,10 +108,13 @@ failures exit 1 and argument errors exit 2.
 
 ### Read-only journeys
 
-Journey v1 is strict TOML. It supports same-origin navigation, URL and visible
-text checkpoints, and target capture without activating the target. Start with
+Journey v1 and v2 are strict TOML. Both support same-origin navigation, URL and visible
+text checkpoints, and target capture without activating the target. V2 adds
+explicit capture-to-checkpoint evidence associations and render-safe bounds.
+Start with
 [`examples/read-only-journey.toml`](examples/read-only-journey.toml), its
-[`journey JSON Schema`](schemas/journey-v1.schema.json), the
+[`journey v2 JSON Schema`](schemas/journey-v2.schema.json), the preserved
+[`journey v1 JSON Schema`](schemas/journey-v1.schema.json), the
 [`run-report JSON Schema`](schemas/run-report-v1.schema.json), and the
 [`journey/report contract`](docs/architecture/journey-v1.md).
 
@@ -156,6 +162,47 @@ report keeps `execution_outcome` and `execution_reason` separate from a later
 evidence or cleanup failure, and `upstream_success` means only that the generic
 agent-browser envelope succeeded before capability-specific validation.
 `clson run` forwards the same arguments and exit status.
+
+### Findings and guides
+
+`crawlson render RUN_DIRECTORY --journey JOURNEY` is an offline consumer of a
+completed run; `clson render` is identical. It launches no browser and accepts
+no arbitrary output location. The CLI-supplied run directory is the only file
+authority. Before writing, Crawlson strictly validates report v1, matches the
+exact journey digest/identity/revision/origin, checks the complete executed step
+sequence, and rehashes every registered artifact. Symlinks, path escapes,
+missing evidence, source drift, focus-sidecar mismatches, incomplete cleanup,
+and contradictory outcomes fail closed.
+
+A final clean pass may produce `render/guide.md` plus deterministic local copies
+of its focused images, but only for passed `capture`
+steps that declare `guide_instruction` and have a verified raw/focused/sidecar
+evidence chain. The guide links the focus image with its red action-area box and
+dimmed surrounding page. Because read-only journey v1 observes but never clicks
+or types, the authored instruction is labeled as the reader's next action; the
+guide does not claim Crawlson executed it.
+
+A final deterministic checkpoint failure produces `render/findings.json` and
+`render/findings.md`. Each finding is `untriaged` rather than assigning invented
+impact, includes the executed reproduction prefix, and links the verified run
+report and trace. A later focused capture is attached only when that capture
+explicitly declares v2 `evidence_for = ["earlier-checkpoint-id"]`; chronology alone
+never creates evidence provenance.
+
+`render/render-report.json` records the deterministic outcome and output
+digests. Output is staged and committed as one renderer-owned directory;
+repeating the same render is a byte-identical no-op, while conflicting prior
+output is preserved and rejected. Guide-ready exits 0, findings-ready exits 1,
+usage exits 2, valid non-publishable runs exit 3, and invalid/incomplete render
+inputs exit 4. See the published
+[`render report`](schemas/render-report-v1.schema.json),
+[`findings`](schemas/findings-v1.schema.json), and
+[`render contract`](docs/architecture/render-v1.md).
+
+Artifact hashing establishes consistency with the local run report, not
+cryptographic authenticity: a party able to replace the whole unsigned bundle
+could replace its hashes too. Focused screenshots can contain sensitive pixels;
+Crawlson does not describe them as redacted or automatically publish-safe.
 
 ### Updates
 

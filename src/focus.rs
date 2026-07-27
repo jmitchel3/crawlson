@@ -279,6 +279,22 @@ struct DecodedPng {
     rgba: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PngInspection {
+    pub width: u32,
+    pub height: u32,
+    pub color_type: String,
+}
+
+pub(crate) fn inspect_png(bytes: &[u8]) -> Result<PngInspection, FocusError> {
+    let decoded = decode_png(bytes)?;
+    Ok(PngInspection {
+        width: decoded.width,
+        height: decoded.height,
+        color_type: decoded.source_color,
+    })
+}
+
 fn decode_png(bytes: &[u8]) -> Result<DecodedPng, FocusError> {
     let mut decoder = Decoder::new(BufReader::new(Cursor::new(bytes)));
     decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
