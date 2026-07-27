@@ -77,16 +77,7 @@ jobs:
           printf '%s\n' "$version" | tee "$logs/agent-browser-version.txt"
           test "$version" = "agent-browser 0.26.0"
 
-          browser_cache="$RUNNER_TEMP/crawlson-ms-playwright-$RELEASE_TARGET"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            # Keep a drive-qualified forward-slash path: Git Bash utilities and
-            # the native Windows browser installer both resolve this form.
-            browser_cache="${browser_cache//\\//}"
-          fi
-          mkdir -p "$browser_cache"
           printf 'AGENT_BROWSER_REAL_BIN=%s\n' "$agent_browser" >> "$GITHUB_ENV"
-          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$browser_cache" >> "$GITHUB_ENV"
-          export PLAYWRIGHT_BROWSERS_PATH="$browser_cache"
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             "$agent_browser" install --with-deps \
               2>&1 | tee "$logs/agent-browser-install.log"
@@ -94,6 +85,9 @@ jobs:
             "$agent_browser" install \
               2>&1 | tee "$logs/agent-browser-install.log"
           fi
+          browser_cache="$(cd "$HOME/.agent-browser/browsers" && pwd -P)"
+          printf 'AGENT_BROWSER_BROWSERS_PATH=%s\n' "$browser_cache" \
+            >> "$GITHUB_ENV"
       - name: Discover extension-capable browser runtime
         shell: bash
         run: |
@@ -102,6 +96,9 @@ jobs:
           extension_browser=""
           while IFS= read -r candidate; do
             case "$candidate" in
+              */chrome-*/chrome-linux*/chrome|\
+              */chrome-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+              */chrome-*/chrome-win*/chrome.exe|\
               */chromium-*/chrome-linux*/chrome|\
               */chromium-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
               */chromium-*/chrome-win*/chrome.exe)
@@ -117,7 +114,7 @@ jobs:
                 fi
                 ;;
             esac
-          done < <(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -print | sort -r)
+          done < <(find "$AGENT_BROWSER_BROWSERS_PATH" -type f -print | sort -r)
           test -n "$extension_browser"
           printf 'EXTENSION_BROWSER=%s\n' "$extension_browser" >> "$GITHUB_ENV"
       - name: Require sandboxed upstream launch diagnostics
