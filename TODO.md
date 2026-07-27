@@ -60,39 +60,49 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 ## Phase 1: define the contracts
 
 - [ ] Define a versioned journey schema that can express:
-  - [ ] journey identity, purpose, and expected user outcome;
-  - [ ] target and allowed hostnames;
-  - [ ] user role and authentication requirements;
-  - [ ] ordered actions and observable checkpoints;
+  - [x] journey identity, purpose, and expected user outcome;
+  - [x] target and exact authorized origin;
+  - [x] user role and authentication requirements without embedding secrets;
+  - [x] ordered read-only actions and observable checkpoints;
   - [ ] whether each step is read-only or mutating;
   - [ ] fixture setup and cleanup requirements;
-  - [ ] evidence to retain; and
-  - [ ] guide-facing titles and instructions when applicable.
-- [ ] Decide which steps are deterministic and which permit agent judgment.
-- [ ] Define run outcomes. At minimum: `passed`, `failed`, `blocked`, and
+  - [x] evidence to retain; and
+  - [x] guide-facing titles and instructions when applicable.
+- [x] Keep every v1 step deterministic; add agent judgment only through a
+      later validated contract.
+- [x] Define run outcomes. At minimum: `passed`, `failed`, `blocked`, and
       `error`. Never encode missing credentials as a pass or an invisible skip.
-- [ ] Define a stable report schema before polishing terminal output.
-- [ ] Define provenance so every screenshot, finding, and guide step can be
+- [x] Define a stable report schema before polishing terminal output.
+- [x] Define provenance so every screenshot and executed step can be
       traced to a particular run and journey version.
 - [ ] Decide how secrets and authenticated session state are supplied without
       entering journey files, logs, screenshots, or generated guides.
 
 ## Phase 2: build the safe runner
 
-- [ ] Add a CLI that validates a journey before launching a browser.
-- [ ] Add exact target allowlisting and reject redirects to unauthorized hosts.
-- [ ] Default every run to read-only mode.
+- [x] Add a CLI that validates a journey before launching a browser.
+- [x] Add exact-origin authorization and stop after an observed unauthorized
+      redirect, while documenting the hostname-only driver limitation.
+- [x] Make every v1 run read-only with no generic click, input, script, or
+      mutation capability.
 - [ ] Require an explicit mutation capability for journeys that change data.
 - [ ] Refuse mutating production runs unless the exact target and operation were
       explicitly authorized.
 - [ ] Add pluggable authentication/session providers.
-- [ ] Implement the first runner with `agent-browser` behind a documented,
+- [x] Implement the first runner with `agent-browser` behind a documented,
       replaceable execution boundary.
 - [ ] Capture step timing, navigation, console errors, failed requests, and
       browser evidence without leaking secrets.
+  - [x] Capture step timing, redacted navigation, console/page-error summaries,
+        and browser evidence.
+  - [ ] Add failed-request capture with an explicit secret-redaction contract.
 - [ ] Implement bounded retries that preserve the original failure evidence.
-- [ ] Implement cleanup as a reported phase; cleanup failure must remain visible.
-- [ ] Handle cancellation and crashes without falsely reporting success.
+- [x] Implement cleanup as a reported phase; cleanup failure must remain visible.
+- [x] Apply per-command and overall run deadlines, bounded evidence/cleanup
+      grace, and a daemon idle reaper.
+- [ ] Handle operating-system cancellation signals and process crashes without
+      falsely reporting success; the 0.2 deadline/reaper does not emit a final
+      report if Crawlson itself is forcibly terminated.
 
 ## Phase 3: turn runs into findings
 
@@ -102,9 +112,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       and reproducible steps.
 - [ ] Deduplicate repeated symptoms within a run without hiding independent
       failures.
-- [ ] Preserve partial evidence for blocked and failed journeys.
+- [x] Preserve partial evidence for blocked and failed journeys.
 - [ ] Add a human review state for subjective usability findings.
-- [ ] Produce deterministic JSON output suitable for CI and integrations.
+- [x] Produce deterministic JSON output suitable for CI and integrations.
 - [ ] Produce a readable local report that links directly to its artifacts.
 
 ## Phase 4: generate honest guides
@@ -114,7 +124,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Include only steps that were actually completed and verified.
 - [ ] Represent blocked, text-only, incomplete, and retired guides explicitly.
 - [ ] Make image naming and replacement deterministic.
-- [ ] Render each guide action screenshot with a reproducible red target outline
+- [x] Render each requested action screenshot with a reproducible red target outline
       and translucent near-black surrounding mask while preserving the raw
       screenshot as authoritative evidence.
 - [ ] Detect orphaned images, dead Markdown links, missing index entries, and
@@ -125,7 +135,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 
 - [ ] Replay a previously successful journey and explain meaningful differences.
 - [ ] Distinguish expected UI evolution from a broken user outcome.
-- [ ] Define stable exit-code behavior for local use and CI.
+- [x] Define stable exit-code behavior for local use and CI.
 - [ ] Publish a CI example that cannot turn missing credentials into green.
 - [ ] Upload reports and evidence even when a run fails.
 - [ ] Add a pull-request summary adapter only after the local workflow is sound.
@@ -142,6 +152,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       third-party credentials.
 - [ ] Add unit tests for schema and safety policy plus end-to-end tests for pass,
       fail, blocked, error, mutation denial, and cleanup failure.
+  - [x] Cover the read-only pass/fail/blocked/error and cleanup contracts with a
+        fake process and an opt-in real agent-browser loopback fixture.
+  - [ ] Add mutation-denial coverage when a mutation contract exists.
 - [ ] Publish only after a clean install can run the demo and reproduce the
       documented artifacts.
 
@@ -152,7 +165,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
 - [x] A process-level, typed-capability `agent-browser` adapter for the MVP;
       consider a broader driver protocol only when a second driver requires it
-- [ ] Declarative data format versus code-first journey API
+- [x] Strict declarative TOML v1 with a published JSON Schema
 - [ ] How agents propose actions without bypassing deterministic safety checks
 - [ ] Local model, hosted model, and model-provider abstraction boundaries
 - [ ] Baseline/diff strategy for UI changes and nondeterministic content

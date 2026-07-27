@@ -1252,7 +1252,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn check_only_never_invokes_the_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.1.1")));
+        let backend = FakeBackend::new(Some(candidate("0.2.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: true,
@@ -1272,7 +1272,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn managed_manual_upgrade_invokes_the_injected_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.1.1")));
+        let backend = FakeBackend::new(Some(candidate("0.2.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1294,7 +1294,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn rendered_manual_policy_rejects_downgrades_and_prereleases() {
-        for version in ["0.0.9", "0.1.1-alpha.1"] {
+        for version in ["0.1.9", "0.2.1-alpha.1"] {
             let backend = FakeBackend::new(Some(candidate(version)));
             let result = run_manual_with_backend(
                 ManualUpgradeOptions {

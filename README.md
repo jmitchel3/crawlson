@@ -64,10 +64,10 @@ The initial tool may include:
 - Markdown guide generation from verified runs; and
 - local CLI and CI integrations.
 
-The MVP core and CLI will be written in Rust. `agent-browser` is the initial
+The MVP core and CLI are written in Rust. `agent-browser` is the initial
 execution path, integrated through its supported process and JSON interface so
-the boundary remains replaceable. The public API, journey format, and package
-layout are still intentionally undecided. See
+the boundary remains replaceable. The first versioned journey and report
+contracts are deliberately narrow and read-only. See
 [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
 for the runtime comparison, adapter lifecycle, safety ownership, and exact
 fallback criteria.
@@ -77,8 +77,11 @@ workflow to the smallest useful, application-independent core.
 
 ## Status
 
-Early development. The Rust 0.1.0 command foundation is working; the safe
-journey runner and guide renderer are the next vertical slices.
+Early development. The Rust 0.2.0 CLI can run one explicitly authorized,
+deterministic read-only journey through `agent-browser`, retain raw evidence,
+and render focused action images. Autonomous agent exploration, authentication
+execution, mutations, findings, and generated Markdown guides remain later
+vertical slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
@@ -88,6 +91,8 @@ cargo build --bins
 ./target/debug/clson version
 ./target/debug/crawlson doctor
 ./target/debug/crawlson upgrade --check
+./target/debug/crawlson --json run examples/read-only-journey.toml \
+  --allow-origin http://127.0.0.1:4173
 ```
 
 `crawlson` is the canonical executable. `clson` is a small launcher that
@@ -97,6 +102,60 @@ so `clson doctor` and `clson upgrade` have the same behavior.
 `doctor` checks for a supported `agent-browser` without installing or changing
 it. Pass `--json` for one machine-readable object on stdout. Operational
 failures exit 1 and argument errors exit 2.
+
+### Read-only journeys
+
+Journey v1 is strict TOML. It supports same-origin navigation, URL and visible
+text checkpoints, and target capture without activating the target. Start with
+[`examples/read-only-journey.toml`](examples/read-only-journey.toml), its
+[`journey JSON Schema`](schemas/journey-v1.schema.json), the
+[`run-report JSON Schema`](schemas/run-report-v1.schema.json), and the
+[`journey/report contract`](docs/architecture/journey-v1.md).
+
+Every valid v1 journey contains at least one deterministic checkpoint and one
+focused capture. Visible-text checkpoints and capture targets must also pass a
+driver visibility check; hidden DOM text cannot produce a green result. After a
+false checkpoint, remaining declared read-only steps still run to preserve the
+requested evidence. A safety block or infrastructure error stops execution.
+
+The journey's `[target].origin` is not enough by itself: every invocation must
+repeat the exact authorized HTTP(S) origin with `--allow-origin`. Crawlson
+normalizes scheme, hostname, and effective port, rejects unsafe documents
+before browser launch, and stops when an observed redirect leaves that origin.
+An authentication requirement is explicit `blocked` until a replaceable
+authentication adapter exists; it is never skipped or treated as passing.
+
+Each run creates a unique directory beneath `crawlson-runs/` (or
+`--output-dir`) containing `report.json`, a required browser trace, and any
+requested screenshots. A `capture` step preserves the raw viewport PNG and
+creates a separate derivative with a red target outline and translucent
+near-black surrounding mask. Reproducible sidecar metadata records the source
+digest, adjacent box/screenshot command provenance, confirmed viewport scale,
+padding, colors, pinned PNG settings, and derivative digest.
+
+Driver commands default to a 20-second deadline and normal journey execution
+to a five-minute deadline. Use `--action-timeout-seconds` (1–29) and
+`--run-timeout-seconds` (30–3600) to narrow or extend them. Required evidence
+finalization and owned-session close receive bounded per-command cleanup grace;
+an agent-browser daemon idle reaper limits orphan lifetime if Crawlson is
+abruptly interrupted.
+
+Run outcomes and process exits are stable:
+
+| Result | Exit |
+| --- | ---: |
+| `passed` | 0 |
+| `failed` checkpoint | 1 |
+| CLI usage error | 2 |
+| safety or precondition `blocked` | 3 |
+| runner, driver, evidence, or cleanup `error` | 4 |
+
+Use `--json` for exactly one versioned run report on stdout. Driver stderr is
+bounded and represented by length/digest metadata, not mixed into JSON. The
+report keeps `execution_outcome` and `execution_reason` separate from a later
+evidence or cleanup failure, and `upstream_success` means only that the generic
+agent-browser envelope succeeded before capability-specific validation.
+`clson run` forwards the same arguments and exit status.
 
 ### Updates
 

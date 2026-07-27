@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/journey-v1.schema.json",
+  "title": "Crawlson read-only journey v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "journey", "target", "evidence", "steps"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "title",
+        "purpose",
+        "expected_outcome",
+        "mode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,96}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "const": "read_only"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "format": "uri",
+          "description": "An absolute root HTTP(S) origin. Crawlson normalizes and compares scheme, ASCII hostname, and effective port."
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "role"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": "Declares a requirement without embedding secrets. Version 0.2 reports such journeys as blocked until an authentication adapter is configured."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace", "diagnostics"],
+      "properties": {
+        "trace": {
+          "const": true
+        },
+        "diagnostics": {
+          "const": true
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "enum": ["check_url", "check_text"]
+                  }
+                },
+                "required": ["type"]
+              }
+            },
+            "required": ["action"]
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "const": "capture"
+                  }
+                },
+                "required": ["type"]
+              }
+            },
+            "required": ["action"]
+          },
+          "minContains": 1
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "action"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,96}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "guide_instruction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/navigate"
+            },
+            {
+              "$ref": "#/$defs/check_url"
+            },
+            {
+              "$ref": "#/$defs/check_text"
+            },
+            {
+              "$ref": "#/$defs/capture"
+            }
+          ]
+        }
+      }
+    },
+    "navigate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path"],
+      "properties": {
+        "type": {
+          "const": "navigate"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/(?!/)"
+        }
+      }
+    },
+    "check_url": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path"],
+      "properties": {
+        "type": {
+          "const": "check_url"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/(?!/)"
+        }
+      }
+    },
+    "check_text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "selector", "expected"],
+      "properties": {
+        "type": {
+          "const": "check_text"
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "expected": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "maxLength": 65536
+        },
+        "comparison": {
+          "enum": ["exact", "contains"],
+          "default": "exact"
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "selector", "alt_text"],
+      "properties": {
+        "type": {
+          "const": "capture"
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "alt_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        }
+      }
+    }
+  }
+}

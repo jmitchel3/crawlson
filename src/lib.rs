@@ -1,5 +1,9 @@
 mod cli;
 pub mod doctor;
+pub mod driver;
+pub mod focus;
+pub mod journey;
+pub mod runner;
 pub mod update;
 
 use std::ffi::OsString;

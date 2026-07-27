@@ -1,0 +1,37 @@
+schema_version = 1
+
+[journey]
+id = "demo.read-home"
+revision = 1
+title = "Read the demo home page"
+purpose = "Verify that a visitor can reach and understand the demo through its visible UI."
+expected_outcome = "The welcome heading and primary action are visible."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-home"
+title = "Open the home page"
+action = { type = "navigate", path = "/" }
+
+[[steps]]
+id = "confirm-location"
+title = "Confirm the home-page location"
+action = { type = "check_url", path = "/" }
+
+[[steps]]
+id = "confirm-heading"
+title = "Confirm the welcome heading"
+action = { type = "check_text", selector = "h1", expected = "Welcome", comparison = "contains" }
+
+[[steps]]
+id = "capture-primary-action"
+title = "Find the primary action"
+guide_instruction = "Use the highlighted primary action to continue."
+action = { type = "capture", selector = "#primary-action", alt_text = "The primary action is highlighted for the next step." }
