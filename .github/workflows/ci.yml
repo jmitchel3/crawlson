@@ -15,6 +15,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CI: "true"
+  CRAWLSON_AUTO_UPGRADE: "0"
+  CRAWLSON_NO_UPDATE_CHECK: "1"
+  CRAWLSON_OFFLINE: "1"
+  DO_NOT_TRACK: "1"
+  NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  NO_UPDATE_NOTIFIER: "1"
 
 jobs:
   test:
@@ -47,14 +54,79 @@ jobs:
       - name: Smoke-test alias command
         run: cargo run --quiet --bin clson -- version
 
+  real-browser:
+    name: real agent-browser demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          check-latest: false
+      - name: Create retained CI log directory
+        run: mkdir -p ci-artifacts
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Select pinned Rust toolchain
+        run: rustup default 1.92.0
+      - name: Install supported agent-browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --global --ignore-scripts --no-audit --no-fund agent-browser@0.26.0 \
+            2>&1 | tee ci-artifacts/agent-browser-package.log
+          CRAWLSON_AB_ROOT="$(npm root --global)/agent-browser"
+          CRAWLSON_AB_BIN="$CRAWLSON_AB_ROOT/bin/agent-browser-linux-x64"
+          chmod 755 "$CRAWLSON_AB_BIN"
+          CRAWLSON_AB_VERSION="$("$CRAWLSON_AB_BIN" --version)"
+          printf '%s\n' "$CRAWLSON_AB_VERSION" | tee ci-artifacts/agent-browser-version.txt
+          test "$CRAWLSON_AB_VERSION" = "agent-browser 0.26.0"
+          echo "AGENT_BROWSER_REAL_BIN=$CRAWLSON_AB_BIN" >> "$GITHUB_ENV"
+      - name: Install browser runtime and Linux dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$AGENT_BROWSER_REAL_BIN" install --with-deps \
+            2>&1 | tee ci-artifacts/agent-browser-install.log
+      - name: Run the documented complete demo
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scripts/demo.sh --agent-browser "$AGENT_BROWSER_REAL_BIN" \
+            --output-dir "$GITHUB_WORKSPACE/ci-artifacts/demo" \
+            2>&1 | tee ci-artifacts/demo-command.log
+      - name: Require the real-browser integration
+        env:
+          CRAWLSON_REAL_BROWSER: required
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo test --test real_agent_browser --locked -- --ignored --nocapture \
+            2>&1 | tee ci-artifacts/real-browser-test.log
+      - name: Upload real-browser evidence and logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: crawlson-real-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts
+          if-no-files-found: error
+          retention-days: 14
+
   ci:
     name: CI
     if: always()
     needs:
       - test
+      - real-browser
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform job
         env:
           TEST_RESULT: ${{ needs.test.result }}
-        run: test "$TEST_RESULT" = success
+          REAL_BROWSER_RESULT: ${{ needs.real-browser.result }}
+        run: |
+          test "$TEST_RESULT" = success
+          test "$REAL_BROWSER_RESULT" = success
