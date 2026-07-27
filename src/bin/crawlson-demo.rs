@@ -186,6 +186,11 @@ fn validate_bind(address: IpAddr) -> Result<(), String> {
 }
 
 fn serve(mut stream: TcpStream) -> Result<(), String> {
+    // Windows can propagate the listener's nonblocking mode to accepted streams.
+    // Request handling is deliberately synchronous, so normalize every stream.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("could not configure the request stream: {error}"))?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|error| error.to_string())?;
@@ -337,5 +342,29 @@ mod tests {
         assert_eq!(post.allow, Some("GET, HEAD"));
 
         assert_eq!(route(b"GET /missing HTTP/1.1\r\n\r\n").status, 404);
+    }
+
+    #[test]
+    fn normalizes_nonblocking_request_streams_before_reading() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            thread::sleep(Duration::from_millis(50));
+            stream
+                .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        serve(stream).unwrap();
+
+        let response = client.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("ready\n"));
     }
 }
