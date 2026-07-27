@@ -39,6 +39,24 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       runtime. Rust was selected with a process-level `agent-browser` boundary;
       see [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md).
 
+## CLI and release foundation
+
+- [x] Start the Rust package at 0.1.0 with `Cargo.toml` as the only product
+      version source.
+- [x] Provide `crawlson` and the equivalent `clson` launcher.
+- [x] Add human and JSON `version` and `doctor` output, including a strict
+      `agent-browser >=0.26.0,<0.27.0` probe.
+- [x] Add `crawlson upgrade` and `clson upgrade` with signed immutable release
+      metadata, exact managed-install ownership, stable-only version policy,
+      verified atomic replacement on supported Unix installs, a fail-closed
+      Windows installer requirement, and package-manager guardrails.
+- [x] Add weekly jittered background updates for managed installs, including
+      offline, CI, privacy, and policy opt-outs. Development builds remain
+      disabled until the release public key and signed assets exist.
+- [x] Add cross-platform CI with a stable aggregate `CI` check.
+- [ ] Publish signed, immutable 0.1.0 artifacts and first-party installers after
+      license and namespace decisions are complete.
+
 ## Phase 1: define the contracts
 
 - [ ] Define a versioned journey schema that can express:
