@@ -17,7 +17,7 @@ Make repository auto-merge meaningful and safe now that the stable CI check has 
 - [x] Require full-SHA GitHub Actions references while keeping workflow tokens read-only and unable to approve pull requests.
 - [x] Add a versioned main ruleset requiring pull requests, the strict up-to-date CI check, resolved conversations, and linear history while preventing deletion and force-push.
 - [x] Use zero approvals during solo maintenance to avoid deadlock; document when to raise it.
-- [ ] Verify the ruleset and repository settings through GitHub APIs and record the result.
+- [x] Verify the ruleset and repository settings through GitHub APIs and record the result.
 
 ## Scope boundaries
 
@@ -41,8 +41,14 @@ Repository governance only. No source behavior, release publication, or broad au
 - The aggregate `CI` check passed on PR #7 and on merge commit
   `d2498c177b2ccd871400cadee6f8c58219e6d396` on `main` across Linux, macOS, and
   Windows before protection was enabled.
-- Live repository settings and the active ruleset will be read back through the
-  GitHub API after application.
+- GitHub API readback confirmed auto-merge, merged-branch deletion, branch
+  updates, and squash merging enabled; merge commits and rebase merging are
+  disabled.
+- Actions API readback confirmed full-SHA pinning, read-only default workflow
+  permissions, and pull-request approval disabled.
+- Ruleset `19799701` is active for the default branch with no bypass actors and
+  exactly the versioned pull-request, `CI`, history, deletion, and force-push
+  rules.
 
 ## Delivered result
 
