@@ -77,8 +77,57 @@ workflow to the smallest useful, application-independent core.
 
 ## Status
 
-Concept stage. This repository is a placeholder for extracting and developing
-Crawlson as a dedicated open-source tool.
+Early development. The Rust 0.1.0 command foundation is working; the safe
+journey runner and guide renderer are the next vertical slices.
+
+Build and exercise the current CLI from a Rust 1.92 environment:
+
+```console
+cargo build --bins
+./target/debug/crawlson version
+./target/debug/clson version
+./target/debug/crawlson doctor
+./target/debug/crawlson upgrade --check
+```
+
+`crawlson` is the canonical executable. `clson` is a small launcher that
+forwards every argument and exit status to the sibling `crawlson` executable,
+so `clson doctor` and `clson upgrade` have the same behavior.
+
+`doctor` checks for a supported `agent-browser` without installing or changing
+it. Pass `--json` for one machine-readable object on stdout. Operational
+failures exit 1 and argument errors exit 2.
+
+### Updates
+
+`crawlson upgrade --check` checks the stable channel; `crawlson upgrade`
+installs a newer stable release only for an exact first-party managed-install
+receipt. Cargo, Homebrew, Nix, unknown, downgrade, and prerelease cases fail
+closed with an appropriate package-manager or reinstall instruction. Crawlson
+never elevates privileges or upgrades `agent-browser`.
+
+First-party managed installations default to automatic compatible upgrades.
+Successful checks run in a separate process no more than weekly, with persisted
+per-install jitter; transient failures retry after at least a day. Foreground
+commands never wait for updater network or worker completion, and worker failure
+cannot change their exit status or JSON. Before 1.0, automatic replacement is
+limited to patch releases in the current minor line. Other installation types
+receive a cached notice only.
+
+Release metadata must be immutable and bind each asset to GitHub's SHA-256
+digest. Crawlson additionally requires a Minisign signature over the exact
+update manifest and verifies the downloaded binary before same-directory atomic
+replacement on supported Unix installations. Direct Windows self-replacement
+fails closed until rollback is proven; Windows upgrades use the installer.
+Development builds fail closed until a release public key is embedded and
+signed assets are published.
+
+Periodic update work is disabled by `CI`, `DO_NOT_TRACK=1`,
+`CRAWLSON_NO_UPDATE_CHECK=1`, `CRAWLSON_OFFLINE=1`, or
+`CRAWLSON_AUTO_UPGRADE=0`. Set `CRAWLSON_UPDATE_POLICY` to `auto`, `notify`, or
+`off`; the equivalent config is `[updates] mode = "..."`. Update requests go
+only to the fixed Crawlson GitHub release endpoints with a version user agent;
+they contain no journey, target, finding, credential, or host telemetry.
 
 Start with [`TODO.md`](TODO.md) for the proposed extraction plan, first vertical
 slice, open design decisions, and MVP acceptance criteria. The
