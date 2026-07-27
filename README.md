@@ -76,4 +76,7 @@ Concept stage. This repository is a placeholder for extracting and developing
 Crawlson as a dedicated open-source tool.
 
 Start with [`TODO.md`](TODO.md) for the proposed extraction plan, first vertical
-slice, open design decisions, and MVP acceptance criteria.
+slice, open design decisions, and MVP acceptance criteria. The
+[`RangerTrac guide lifecycle inventory`](docs/architecture/rangertrac-guide-lifecycle.md)
+records the source-system findings and the recommended core/adapter boundary for
+that first slice.
