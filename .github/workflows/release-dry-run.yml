@@ -135,7 +135,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          env -u CI "$AGENT_BROWSER_REAL_BIN" doctor --offline --json \
+          # Keep a broken upstream diagnostic from consuming the entire release
+          # matrix. A timeout is an honest failure signal and preserves the
+          # release job's fail-closed behavior.
+          command -v timeout >/dev/null
+          timeout --foreground 120s env -u CI "$AGENT_BROWSER_REAL_BIN" doctor --offline --json \
             2>&1 | tee "release-output/$RELEASE_TARGET/logs/agent-browser-doctor.json"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.92.0 --profile minimal
