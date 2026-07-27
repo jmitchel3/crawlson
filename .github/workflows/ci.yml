@@ -94,6 +94,28 @@ jobs:
           set -Eeuo pipefail
           "$AGENT_BROWSER_REAL_BIN" install --with-deps \
             2>&1 | tee ci-artifacts/agent-browser-install.log
+      - name: Resolve installer-managed Chrome for Testing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CRAWLSON_BROWSER_CACHE="$(cd "$HOME/.agent-browser/browsers" && pwd -P)"
+          shopt -s nullglob
+          CRAWLSON_BROWSER_CANDIDATES=(
+            "$CRAWLSON_BROWSER_CACHE"/chrome-*/chrome
+          )
+          test "${#CRAWLSON_BROWSER_CANDIDATES[@]}" -eq 1
+          CRAWLSON_BROWSER_BIN="${CRAWLSON_BROWSER_CANDIDATES[0]}"
+          test -f "$CRAWLSON_BROWSER_BIN"
+          test ! -L "$CRAWLSON_BROWSER_BIN"
+          test -x "$CRAWLSON_BROWSER_BIN"
+          CRAWLSON_BROWSER_VERSION="$("$CRAWLSON_BROWSER_BIN" --version)"
+          [[ "$CRAWLSON_BROWSER_VERSION" == *"Chrome for Testing"* ]]
+          CRAWLSON_BROWSER_BIN="$(
+            cd "$(dirname "$CRAWLSON_BROWSER_BIN")" && pwd -P
+          )/$(basename "$CRAWLSON_BROWSER_BIN")"
+          printf '%s\n' "$CRAWLSON_BROWSER_VERSION" \
+            | tee ci-artifacts/extension-browser-version.txt
+          echo "CRAWLSON_REAL_BROWSER_BIN=$CRAWLSON_BROWSER_BIN" >> "$GITHUB_ENV"
       - name: Require sandboxed upstream launch diagnostics
         shell: bash
         run: |
@@ -142,6 +164,7 @@ jobs:
             --crawlson-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson" \
             --demo-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson-demo" \
             --agent-browser "$AGENT_BROWSER_REAL_BIN" \
+            --browser-executable "$CRAWLSON_REAL_BROWSER_BIN" \
             --output-dir "$GITHUB_WORKSPACE/ci-artifacts/demo" \
             2>&1 | tee ci-artifacts/demo-command.log
       - name: Require the real-browser integration

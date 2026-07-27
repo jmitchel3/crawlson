@@ -107,7 +107,18 @@ jobs:
               */chromium-*/chrome-win*/chrome.exe)
                 test -f "$candidate" || continue
                 test -x "$candidate" || continue
-                browser_version="$("$candidate" --version 2>/dev/null || true)"
+                if [[ "$RUNNER_OS" == "Windows" ]]; then
+                  product_version="$(
+                    CANDIDATE_WINDOWS="$(cygpath -w "$candidate")" \
+                      powershell.exe -NoProfile -NonInteractive -Command \
+                      '$item = Get-Item -LiteralPath $env:CANDIDATE_WINDOWS; $item.VersionInfo.ProductVersion' \
+                      | tr -d '\r'
+                  )"
+                  test -n "$product_version"
+                  browser_version="Chrome for Testing $product_version"
+                else
+                  browser_version="$("$candidate" --version 2>/dev/null || true)"
+                fi
                 if [[ "$browser_version" == *"Chrome for Testing"* \
                   || "$browser_version" == *"Chromium"* ]]; then
                   extension_browser="$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")"

@@ -556,7 +556,7 @@ fn write_new_journal(path: &Path, bytes: &[u8]) -> Result<(), WriteJournalError>
     }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    set_private_file_mode(&mut options);
+    configure_new_journal(&mut options);
     let mut file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -890,13 +890,24 @@ fn add_no_follow(options: &mut OpenOptions) {
 fn add_no_follow(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
-fn set_private_file_mode(options: &mut OpenOptions) {
+fn configure_new_journal(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
     options.mode(0o600);
 }
 
-#[cfg(not(unix))]
-fn set_private_file_mode(_options: &mut OpenOptions) {}
+#[cfg(windows)]
+fn configure_new_journal(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Windows has no dependable POSIX-style parent-directory fsync. Request
+    // write-through when creating each journal so the file contents and the
+    // metadata produced by the write reach storage before `begin` succeeds.
+    // `sync_all` below remains required and reports any flush failure.
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+    options.custom_flags(FILE_FLAG_WRITE_THROUGH);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_new_journal(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
 fn create_private_directory(path: &Path) -> std::io::Result<()> {
@@ -917,13 +928,25 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    directory.sync_all()
+    // `File::sync_all` delegates to FlushFileBuffers, which requires a
+    // GENERIC_WRITE file handle and is not a supported parent-directory fsync
+    // primitive. Journal creation is instead opened with
+    // FILE_FLAG_WRITE_THROUGH and followed by a file-level `sync_all`.
+    // After verified cleanup, a namespace deletion lost to a crash can only
+    // restore an extra barrier, which remains the fail-closed outcome.
+    //
+    // Still validate the path at each durability boundary so replacement by a
+    // reparse point or non-directory fails closed.
+    let metadata = fs::symlink_metadata(path)?;
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(std::io::Error::other("unsafe recovery directory"));
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
