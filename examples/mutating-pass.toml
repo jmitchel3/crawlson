@@ -1,0 +1,76 @@
+schema_version = 5
+
+[journey]
+id = "demo.mutating-pass"
+revision = 1
+title = "Create and remove a disposable fixture"
+purpose = "Verify a visible form mutation with focused evidence and guaranteed cleanup."
+expected_outcome = "The disposable fixture is created through the UI and is absent after cleanup."
+mode = "mutating"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[authentication]
+provider = "agent-browser-state-file"
+role = "disposable-viewer"
+verification_step = "verify-disposable-actor"
+disposable_actor = true
+
+[fixture]
+kind = "self_expiring_ui"
+maximum_lifetime_seconds = 600
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[setup_steps]]
+id = "open-authenticated-demo"
+title = "Open the authenticated demo"
+effect = "read_only"
+action = { type = "navigate", path = "/authenticated" }
+
+[[setup_steps]]
+id = "verify-disposable-actor"
+title = "Verify the disposable actor"
+effect = "read_only"
+action = { type = "check_text", selector = "#authenticated-role", expected = "Viewer access", comparison = "exact" }
+
+[[setup_steps]]
+id = "open-empty-fixture"
+title = "Open the disposable fixture form"
+effect = "read_only"
+action = { type = "navigate", path = "/mutation" }
+
+[[setup_steps]]
+id = "verify-fixture-absent"
+title = "Verify the fixture starts absent"
+effect = "read_only"
+action = { type = "check_absent", selector = "#fixture-empty", expected_text = "Disposable fixture absent." }
+
+[[steps]]
+id = "fill-fixture-name"
+title = "Enter a unique fixture name"
+guide_instruction = "Enter a fresh public fixture value in the highlighted field."
+effect = "mutating"
+action = { type = "fill_text", selector = "#fixture-name", value = "$fixture_token", alt_text = "Public fixture field highlighted in red" }
+
+[[steps]]
+id = "create-fixture"
+title = "Create the disposable fixture"
+guide_instruction = "Select the highlighted Create fixture button once."
+effect = "mutating"
+action = { type = "click_button", selector = "#create-fixture-button", form_selector = "#fixture-form", action_path = "/mutation/create", expected_path = "/mutation/created", verify_selector = "#fixture-result", expected_text = "Disposable fixture created.", alt_text = "Create fixture button highlighted in red" }
+
+[[cleanup_steps]]
+id = "open-fixture-cleanup"
+title = "Open fixture cleanup"
+effect = "read_only"
+action = { type = "navigate", path = "/mutation/created" }
+
+[[cleanup_steps]]
+id = "ensure-fixture-absent"
+title = "Remove and verify the disposable fixture"
+effect = "mutating"
+action = { type = "ensure_absent", status_selector = "#fixture-empty", expected_text = "Disposable fixture absent.", button_selector = "#remove-fixture-button", form_selector = "#cleanup-form", action_path = "/mutation/delete", expected_path = "/mutation/empty", alt_text = "Remove fixture button highlighted in red" }

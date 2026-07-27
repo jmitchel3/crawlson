@@ -340,10 +340,10 @@ fn read_regular_bounded(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8
 }
 
 fn validate_report_header(report: &InputRunReport) -> Result<(), RenderError> {
-    if !matches!(report.schema_version, 1..=3) {
+    if !matches!(report.schema_version, 1..=4) {
         return Err(RenderError::new(
             "report_version_unsupported",
-            "only run report schema versions 1, 2, and 3 can be rendered",
+            "only run report schema versions 1, 2, 3, and 4 can be rendered",
         ));
     }
     if report.run_directory.len() > 32_768 || report.run_directory.chars().any(char::is_control) {
@@ -467,6 +467,10 @@ fn validate_driver(driver: &InputDriver) -> Result<(), RenderError> {
         "is_visible",
         "is_enabled",
         "get_attribute",
+        "get_count",
+        "get_value",
+        "fill",
+        "exact_origin_guard",
         "click",
         "bounding_box",
         "screenshot",
@@ -516,7 +520,7 @@ fn validate_completed_driver(
         .filter(|version| version.major == 0 && version.minor == 26 && version.pre.is_empty());
     let session = report.driver.session.as_deref();
     let commands = &report.driver.commands;
-    let authentication_offset = usize::from(journey.schema_version == 4);
+    let authentication_offset = usize::from(matches!(journey.schema_version, 4 | 5));
     let lifecycle_valid = commands.len() >= 6 + authentication_offset
         && commands[0].capability == "set_viewport"
         && (authentication_offset == 0 || commands[1].capability == "authentication_load")
@@ -638,11 +642,153 @@ fn validate_completed_driver(
     Ok(())
 }
 
+fn validate_completed_mutation_driver(
+    report: &InputRunReport,
+    journey: &ValidatedJourney,
+) -> Result<(), RenderError> {
+    let version = report
+        .driver
+        .version
+        .as_deref()
+        .and_then(|value| semver::Version::parse(value).ok())
+        .filter(|version| version.major == 0 && version.minor == 26 && version.pre.is_empty());
+    let Some(session) = report.driver.session.as_deref() else {
+        return Err(RenderError::new(
+            "report_invalid",
+            "mutating execution omitted its browser session",
+        ));
+    };
+    let commands = &report.driver.commands;
+    if version.is_none()
+        || commands.len() < 7
+        || commands[0].capability != "set_viewport"
+        || commands[1].capability != "authentication_load"
+        || commands[2].capability != "trace_start"
+        || commands[commands.len() - 4].capability != "console"
+        || commands[commands.len() - 3].capability != "page_errors"
+        || commands[commands.len() - 2].capability != "trace_stop"
+        || commands[commands.len() - 1].capability != "close"
+        || commands
+            .iter()
+            .any(|command| !command.upstream_success || command.exit_code != Some(0))
+    {
+        return Err(RenderError::new(
+            "report_invalid",
+            "completed mutation driver lifecycle is incomplete or unsuccessful",
+        ));
+    }
+    let mut referenced_actions = HashSet::new();
+    let mut referenced_guards = HashSet::new();
+    for step in &report.steps {
+        if step.effect == Some(crate::journey::StepEffect::Mutating)
+            && matches!(step.status, Outcome::Passed | Outcome::Failed)
+        {
+            let Some(guard_sequence) = step.observation.guard_command_sequence else {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "completed mutation omitted exact-origin guard provenance",
+                ));
+            };
+            if !referenced_guards.insert(guard_sequence)
+                || commands
+                    .get(guard_sequence.saturating_sub(1) as usize)
+                    .is_none_or(|command| command.capability != "exact_origin_guard")
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "exact-origin guard provenance is missing, reused, or invalid",
+                ));
+            }
+        }
+        let Some(sequence) = step.observation.action_command_sequence else {
+            continue;
+        };
+        if !referenced_actions.insert(sequence) {
+            return Err(RenderError::new(
+                "report_invalid",
+                "mutation command is referenced by more than one step",
+            ));
+        }
+        let command = commands.get(sequence.saturating_sub(1) as usize);
+        let expected = match step.kind.as_str() {
+            "fill_text" => "fill",
+            "click_button" | "ensure_absent" => "click",
+            _ => {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "non-mutation step references a mutation command",
+                ));
+            }
+        };
+        let screenshot = step.observation.screenshot_command_sequence.unwrap_or(0);
+        let guard = step.observation.guard_command_sequence.unwrap_or(0);
+        let expected_token = format!(
+            "{}:{}:{}:{}",
+            session,
+            step.observation.box_command_sequence.unwrap_or(0),
+            screenshot,
+            sequence
+        );
+        if command.is_none_or(|command| command.capability != expected)
+            || sequence != screenshot.saturating_add(1)
+            || guard >= step.observation.box_command_sequence.unwrap_or(0)
+            || step.observation.capture_token.as_deref() != Some(expected_token.as_str())
+        {
+            return Err(RenderError::new(
+                "report_invalid",
+                "mutation dispatch is not bound to an attested pre-action capture",
+            ));
+        }
+    }
+    let driver_actions = commands
+        .iter()
+        .filter(|command| matches!(command.capability.as_str(), "fill" | "click"))
+        .map(|command| command.sequence)
+        .collect::<HashSet<_>>();
+    let driver_guards = commands
+        .iter()
+        .filter(|command| command.capability == "exact_origin_guard")
+        .map(|command| command.sequence)
+        .collect::<HashSet<_>>();
+    if driver_actions != referenced_actions
+        || driver_guards != referenced_guards
+        || report
+            .steps
+            .iter()
+            .filter(|step| step.effect == Some(crate::journey::StepEffect::Mutating))
+            .any(|step| {
+                step.observation.action_grant_sha256.as_deref()
+                    != Some(mutation_step_binding_for_render(journey, &step.id).as_str())
+            })
+    {
+        return Err(RenderError::new(
+            "report_invalid",
+            "mutation command or grant provenance is incomplete",
+        ));
+    }
+    Ok(())
+}
+
+fn mutation_step_binding_for_render(journey: &ValidatedJourney, step_id: &str) -> String {
+    let grant = format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step_id);
+    let binding = format!(
+        "crawlson-mutation-step-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nstep={}\ngrant={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        step_id,
+        grant
+    );
+    journey::hex_digest(binding.as_bytes())
+}
+
 fn validate_provenance(
     report: &InputRunReport,
     journey: &ValidatedJourney,
 ) -> Result<(), RenderError> {
     let expected_report_version = match journey.schema_version {
+        5 => 4,
         4 => 3,
         3 => 2,
         _ => 1,
@@ -661,6 +807,7 @@ fn validate_provenance(
         ));
     }
     validate_action_authorization(report, journey)?;
+    validate_mutation_authorization(report, journey)?;
     validate_authentication(report, journey)?;
     Ok(())
 }
@@ -669,7 +816,7 @@ fn validate_authentication(
     report: &InputRunReport,
     journey: &ValidatedJourney,
 ) -> Result<(), RenderError> {
-    if journey.schema_version != 4 {
+    if !matches!(journey.schema_version, 4 | 5) {
         if report.authentication.is_some() {
             return Err(RenderError::new(
                 "report_invalid",
@@ -813,11 +960,101 @@ fn validate_action_authorization(
     Ok(())
 }
 
+fn validate_mutation_authorization(
+    report: &InputRunReport,
+    journey: &ValidatedJourney,
+) -> Result<(), RenderError> {
+    if journey.schema_version != 5 {
+        if report.mutation_authorization.is_some() || report.fixture.is_some() {
+            return Err(RenderError::new(
+                "report_invalid",
+                "legacy run unexpectedly contains mutation lifecycle provenance",
+            ));
+        }
+        return Ok(());
+    }
+    let authorization = report.mutation_authorization.as_ref().ok_or_else(|| {
+        RenderError::new(
+            "report_invalid",
+            "mutating report omitted mutation authorization provenance",
+        )
+    })?;
+    let fixture = report.fixture.as_ref().ok_or_else(|| {
+        RenderError::new(
+            "report_invalid",
+            "mutating report omitted fixture lifecycle provenance",
+        )
+    })?;
+    let mut required = journey
+        .mutating_steps()
+        .map(|step| format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step.id))
+        .collect::<Vec<_>>();
+    required.sort();
+    let mut granted = authorization.granted.clone();
+    granted.sort();
+    granted.dedup();
+    let mut production_granted = authorization.production_granted.clone();
+    production_granted.sort();
+    production_granted.dedup();
+    let production_required = !journey.origin.is_literal_loopback();
+    let binding = format!(
+        "crawlson-mutation-grant-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nrequired={}\ngranted={}\nproduction_required={}\nproduction_granted={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        required.join(","),
+        authorization.granted.join(","),
+        production_required,
+        authorization.production_granted.join(",")
+    );
+    let declared_fixture = journey.fixture.as_ref().expect("v5 fixture was validated");
+    let grants_valid = authorization.required == required
+        && authorization.granted == granted
+        && authorization.production_granted == production_granted
+        && authorization.production_required == production_required
+        && authorization.binding_sha256 == journey::hex_digest(binding.as_bytes())
+        && (report.driver.commands.is_empty() || authorization.granted == required)
+        && (!production_required
+            || report.driver.commands.is_empty()
+            || production_granted == required)
+        && (production_required || production_granted.is_empty());
+    let fixture_valid = fixture.kind == "self_expiring_ui"
+        && fixture.maximum_lifetime_seconds == declared_fixture.maximum_lifetime_seconds
+        && fixture.maximum_lifetime_seconds > 0
+        && fixture.maximum_lifetime_seconds <= 3_600
+        && (!fixture.recovery_required
+            || matches!(
+                fixture.cleanup_status,
+                InputFixtureCleanupStatus::Failed | InputFixtureCleanupStatus::EffectUnknown
+            )
+            || (fixture.cleanup_status == InputFixtureCleanupStatus::NotNeeded
+                && !fixture.mutation_attempted
+                && matches!(report.outcome, Outcome::Blocked | Outcome::Error))
+            || report.execution_reason.code.starts_with("recovery_"))
+        && (report.outcome != Outcome::Passed
+            || (fixture.setup_status == InputFixtureSetupStatus::Passed
+                && fixture.mutation_attempted
+                && fixture.cleanup_status == InputFixtureCleanupStatus::Passed
+                && !fixture.recovery_required))
+        && (report.outcome != Outcome::Failed
+            || (fixture.setup_status == InputFixtureSetupStatus::Passed
+                && fixture.cleanup_status == InputFixtureCleanupStatus::Passed
+                && !fixture.recovery_required));
+    if !grants_valid || !fixture_valid {
+        return Err(RenderError::new(
+            "report_invalid",
+            "mutation authorization or disposable fixture lifecycle is contradictory",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_renderable_journey(journey: &ValidatedJourney) -> Result<(), RenderError> {
     let meta_safe = safe_single_line(&journey.meta.title, 4_096)
         && safe_prose(&journey.meta.purpose, 65_536)
         && safe_prose(&journey.meta.expected_outcome, 65_536);
-    let steps_safe = journey.steps.iter().all(|step| {
+    let steps_safe = journey.phase_steps().all(|(_, step)| {
         safe_single_line(&step.title, 4_096)
             && step
                 .guide_instruction
@@ -840,6 +1077,51 @@ fn validate_renderable_journey(journey: &ValidatedJourney) -> Result<(), RenderE
                 } => {
                     safe_single_line(selector, 4_096)
                         && safe_prose(alt_text, 4_096)
+                        && expected_url.query().is_none()
+                        && expected_url.fragment().is_none()
+                }
+                ValidatedAction::FillText {
+                    selector, alt_text, ..
+                } => safe_single_line(selector, 4_096) && safe_prose(alt_text, 4_096),
+                ValidatedAction::ClickButton {
+                    selector,
+                    form_selector,
+                    action_url,
+                    expected_url,
+                    verify_selector,
+                    expected_text,
+                    alt_text,
+                } => {
+                    safe_single_line(selector, 4_096)
+                        && safe_single_line(form_selector, 4_096)
+                        && safe_single_line(verify_selector, 4_096)
+                        && safe_prose(expected_text, 65_536)
+                        && safe_prose(alt_text, 4_096)
+                        && action_url.query().is_none()
+                        && action_url.fragment().is_none()
+                        && expected_url.query().is_none()
+                        && expected_url.fragment().is_none()
+                }
+                ValidatedAction::CheckAbsent {
+                    selector,
+                    expected_text,
+                } => safe_single_line(selector, 4_096) && safe_prose(expected_text, 65_536),
+                ValidatedAction::EnsureAbsent {
+                    status_selector,
+                    expected_text,
+                    button_selector,
+                    form_selector,
+                    action_url,
+                    expected_url,
+                    alt_text,
+                } => {
+                    safe_single_line(status_selector, 4_096)
+                        && safe_prose(expected_text, 65_536)
+                        && safe_single_line(button_selector, 4_096)
+                        && safe_single_line(form_selector, 4_096)
+                        && safe_prose(alt_text, 4_096)
+                        && action_url.query().is_none()
+                        && action_url.fragment().is_none()
                         && expected_url.query().is_none()
                         && expected_url.fragment().is_none()
                 }
@@ -879,6 +1161,9 @@ fn is_bidi_control(character: char) -> bool {
 }
 
 fn validate_steps(report: &InputRunReport, journey: &ValidatedJourney) -> Result<(), RenderError> {
+    if journey.schema_version == 5 {
+        return validate_v5_steps(report, journey);
+    }
     if matches!(report.execution_outcome, Outcome::Passed | Outcome::Failed)
         && report.diagnostics.is_none()
     {
@@ -962,6 +1247,145 @@ fn validate_steps(report: &InputRunReport, journey: &ValidatedJourney) -> Result
     Ok(())
 }
 
+fn validate_v5_steps(
+    report: &InputRunReport,
+    journey: &ValidatedJourney,
+) -> Result<(), RenderError> {
+    let recovery_completed = report.reason.code == "recovery_completed"
+        && report.outcome == Outcome::Blocked
+        && report.execution_outcome == Outcome::Blocked;
+    if (matches!(report.execution_outcome, Outcome::Passed | Outcome::Failed) || recovery_completed)
+        && report.diagnostics.is_none()
+    {
+        return Err(RenderError::new(
+            "run_incomplete",
+            "a completed mutating execution requires diagnostics",
+        ));
+    }
+    let declared = [
+        (
+            crate::journey::StepPhase::Setup,
+            journey.setup_steps.as_slice(),
+        ),
+        (crate::journey::StepPhase::Journey, journey.steps.as_slice()),
+        (
+            crate::journey::StepPhase::FixtureCleanup,
+            journey.cleanup_steps.as_slice(),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(phase, steps)| {
+        steps
+            .iter()
+            .enumerate()
+            .map(move |(phase_index, step)| (step.id.as_str(), (phase, phase_index, step)))
+    })
+    .collect::<HashMap<_, _>>();
+    let mut phase_rank = 0u8;
+    let mut next_phase_index = [0usize; 3];
+    let mut seen = HashSet::new();
+    for (index, executed) in report.steps.iter().enumerate() {
+        let Some((declared_phase, declared_phase_index, step)) =
+            declared.get(executed.id.as_str()).copied()
+        else {
+            return Err(RenderError::new(
+                "journey_drift",
+                "executed mutation step is not declared",
+            ));
+        };
+        let rank = match declared_phase {
+            crate::journey::StepPhase::Setup => 0,
+            crate::journey::StepPhase::Journey => 1,
+            crate::journey::StepPhase::FixtureCleanup => 2,
+        };
+        if executed.sequence != index as u32 + 1
+            || !seen.insert(executed.id.as_str())
+            || rank < phase_rank
+            || declared_phase_index != next_phase_index[rank as usize]
+            || executed.phase != Some(declared_phase)
+            || executed.effect != Some(step.effect)
+            || executed.title != step.title
+            || executed.kind != action_kind(&step.action)
+            || executed.duration_ms > report.duration_ms
+        {
+            return Err(RenderError::new(
+                "journey_drift",
+                "mutation phase, order, identity, or effect differs from the journey",
+            ));
+        }
+        phase_rank = rank;
+        next_phase_index[rank as usize] += 1;
+        validate_observation(executed, &step.action, journey)?;
+    }
+    let fixture = report
+        .fixture
+        .as_ref()
+        .expect("v5 fixture presence was validated");
+    let setup_complete = journey
+        .setup_steps
+        .iter()
+        .all(|step| seen.contains(step.id.as_str()));
+    let main_complete = journey
+        .steps
+        .iter()
+        .all(|step| seen.contains(step.id.as_str()));
+    let cleanup_complete = journey
+        .cleanup_steps
+        .iter()
+        .all(|step| seen.contains(step.id.as_str()));
+    if recovery_completed {
+        let authentication_step = journey
+            .authentication
+            .as_ref()
+            .and_then(|authentication| authentication.verification_step.as_deref())
+            .expect("v5 authentication verification was validated");
+        let recovery_setup_steps = journey
+            .setup_steps
+            .iter()
+            .position(|step| step.id == authentication_step)
+            .expect("v5 authentication verification is a setup step")
+            + 1;
+        if next_phase_index[0] != recovery_setup_steps
+            || next_phase_index[1] != 0
+            || next_phase_index[2] != journey.cleanup_steps.len()
+            || report
+                .steps
+                .iter()
+                .any(|step| step.status != Outcome::Passed)
+        {
+            return Err(RenderError::new(
+                "report_invalid",
+                "recovery completion must contain only the authentication setup prefix and complete verified cleanup",
+            ));
+        }
+    }
+    if fixture.setup_status == InputFixtureSetupStatus::Passed && !setup_complete
+        || fixture.cleanup_status == InputFixtureCleanupStatus::Passed && !cleanup_complete
+        || report.outcome == Outcome::Passed
+            && (!setup_complete
+                || !main_complete
+                || !cleanup_complete
+                || report
+                    .steps
+                    .iter()
+                    .any(|step| step.status != Outcome::Passed))
+        || report.execution_outcome == Outcome::Failed
+            && !report.steps.iter().any(|step| {
+                step.phase == Some(crate::journey::StepPhase::Journey)
+                    && step.status == Outcome::Failed
+            })
+    {
+        return Err(RenderError::new(
+            "run_incomplete",
+            "mutation execution and lifecycle phase records are incomplete",
+        ));
+    }
+    if matches!(report.outcome, Outcome::Passed | Outcome::Failed) || recovery_completed {
+        validate_completed_mutation_driver(report, journey)?;
+    }
+    Ok(())
+}
+
 fn validate_observation(
     step: &InputStep,
     action: &ValidatedAction,
@@ -984,6 +1408,20 @@ fn validate_observation(
             grant
         );
         journey::hex_digest(binding.as_bytes())
+    }).or_else(|| {
+        action.is_mutating().then(|| {
+            let grant = format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step.id);
+            let binding = format!(
+                "crawlson-mutation-step-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nstep={}\ngrant={}\n",
+                journey.meta.id,
+                journey.meta.revision,
+                journey.source_sha256,
+                journey.origin,
+                step.id,
+                grant
+            );
+            journey::hex_digest(binding.as_bytes())
+        })
     });
     if observation
         .observed_text_sha256
@@ -1042,10 +1480,20 @@ fn validate_observation(
         | ValidatedAction::CheckUrl { url }
         | ValidatedAction::FollowLink {
             expected_url: url, ..
+        }
+        | ValidatedAction::ClickButton {
+            expected_url: url, ..
         } => Some(safe_declared_url(url)),
+        ValidatedAction::EnsureAbsent {
+            expected_url: url, ..
+        } if observation.action_command_sequence.is_some() => Some(safe_declared_url(url)),
         _ => None,
     };
-    if declared_url.is_some() && observation.expected_url != declared_url {
+    let idempotent_cleanup_without_click = matches!(action, ValidatedAction::EnsureAbsent { .. })
+        && observation.action_command_sequence.is_none();
+    if declared_url.is_some() && observation.expected_url != declared_url
+        || idempotent_cleanup_without_click && observation.expected_url.is_some()
+    {
         return Err(RenderError::new(
             "report_invalid",
             "step expected URL differs from the declared journey action",
@@ -1130,9 +1578,84 @@ fn validate_observation(
                 ));
             }
         }
+        "fill_text" if step.status == Outcome::Passed => {
+            if observation.visible != Some(true)
+                || observation.enabled != Some(true)
+                || observation.matched != Some(true)
+                || observation.action_state != Some(InputActionState::EffectVerified)
+                || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+                || observation.action_command_sequence.is_none()
+                || observation.artifact_path.is_none()
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "passed fill mutation provenance is incomplete",
+                ));
+            }
+        }
+        "click_button" if step.status == Outcome::Passed => {
+            if observation.visible != Some(true)
+                || observation.enabled != Some(true)
+                || observation.matched != Some(true)
+                || observation.action_state != Some(InputActionState::EffectVerified)
+                || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+                || observation.action_command_sequence.is_none()
+                || observation.artifact_path.is_none()
+                || observation.expected_url.is_none()
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "passed button mutation provenance is incomplete",
+                ));
+            }
+        }
+        "check_absent" if matches!(step.status, Outcome::Passed | Outcome::Failed) => {
+            if observation.matched != Some(step.status == Outcome::Passed)
+                || (observation.visible == Some(true) && observation.observed_text_sha256.is_none())
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "fixture absence checkpoint contradicts its status",
+                ));
+            }
+        }
+        "ensure_absent" if step.status == Outcome::Passed => {
+            if observation.matched != Some(true)
+                || observation.action_state != Some(InputActionState::EffectVerified)
+                || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+                || (observation.action_command_sequence.is_some()
+                    && observation.artifact_path.is_none())
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "verified fixture cleanup provenance is incomplete",
+                ));
+            }
+        }
+        "fill_text" | "click_button" | "ensure_absent" if step.status == Outcome::Failed => {
+            if !matches!(
+                observation.action_state,
+                Some(
+                    InputActionState::NotAttempted
+                        | InputActionState::DriverAcknowledged
+                        | InputActionState::EffectUnverified
+                )
+            ) || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "failed mutation provenance contradicts its status",
+                ));
+            }
+        }
         _ => {}
     }
-    if matches!(step.kind.as_str(), "capture" | "follow_link")
+    let capture_required = matches!(
+        step.kind.as_str(),
+        "capture" | "follow_link" | "fill_text" | "click_button"
+    ) || (step.kind == "ensure_absent"
+        && observation.action_command_sequence.is_some());
+    if capture_required
         && step.status == Outcome::Passed
         && (observation.visible != Some(true)
             || observation.artifact_path.is_none()
@@ -1149,6 +1672,21 @@ fn validate_observation(
         return Err(RenderError::new(
             "report_invalid",
             "passed capture provenance is incomplete",
+        ));
+    }
+    let has_capture_provenance = observation.artifact_path.is_some()
+        || observation.target_box_css.is_some()
+        || observation.viewport.is_some()
+        || observation.capture_token.is_some()
+        || observation.box_command_sequence.is_some()
+        || observation.screenshot_command_sequence.is_some();
+    if step.kind == "ensure_absent"
+        && observation.action_command_sequence.is_none()
+        && has_capture_provenance
+    {
+        return Err(RenderError::new(
+            "report_invalid",
+            "idempotent cleanup without a click claimed capture provenance",
         ));
     }
     Ok(())
@@ -1174,14 +1712,21 @@ fn verify_artifacts(
     report: &InputRunReport,
     journey: &ValidatedJourney,
 ) -> Result<VerifiedArtifacts, RenderError> {
-    let step_ids: HashSet<&str> = journey.steps.iter().map(|step| step.id.as_str()).collect();
+    let step_ids: HashSet<&str> = journey
+        .phase_steps()
+        .map(|(_, step)| step.id.as_str())
+        .collect();
     let evidence_ids: HashSet<&str> = journey
-        .steps
-        .iter()
+        .phase_steps()
+        .map(|(_, step)| step)
         .filter(|step| {
             matches!(
                 step.action,
-                ValidatedAction::Capture { .. } | ValidatedAction::FollowLink { .. }
+                ValidatedAction::Capture { .. }
+                    | ValidatedAction::FollowLink { .. }
+                    | ValidatedAction::FillText { .. }
+                    | ValidatedAction::ClickButton { .. }
+                    | ValidatedAction::EnsureAbsent { .. }
             )
         })
         .map(|step| step.id.as_str())
@@ -1320,8 +1865,10 @@ fn verify_artifacts(
         verify_focus_metadata(artifact, bytes, &by_path, &png_inspections, journey, step)?;
     }
     for step in report.steps.iter().filter(|step| {
-        matches!(step.kind.as_str(), "capture" | "follow_link")
-            && step.observation.box_command_sequence.is_some()
+        matches!(
+            step.kind.as_str(),
+            "capture" | "follow_link" | "fill_text" | "click_button" | "ensure_absent"
+        ) && step.observation.box_command_sequence.is_some()
     }) {
         let focused = focused_by_step.get(&step.id).ok_or_else(|| {
             RenderError::new(
@@ -1359,7 +1906,13 @@ fn verify_artifacts(
             ));
         }
     }
-    if matches!(report.execution_outcome, Outcome::Passed | Outcome::Failed) && trace.is_none() {
+    let recovery_completed = journey.schema_version == 5
+        && report.reason.code == "recovery_completed"
+        && report.outcome == Outcome::Blocked
+        && report.execution_outcome == Outcome::Blocked;
+    if (matches!(report.execution_outcome, Outcome::Passed | Outcome::Failed) || recovery_completed)
+        && trace.is_none()
+    {
         return Err(RenderError::new(
             "artifact_missing",
             "completed execution requires a verified trace",
@@ -1461,13 +2014,16 @@ fn verify_focus_metadata(
         .as_deref()
         .ok_or_else(|| RenderError::new("report_invalid", "focus metadata has no capture step"))?;
     let declared = journey
-        .steps
-        .iter()
+        .phase_steps()
+        .map(|(_, step)| step)
         .find(|step| step.id == step_id)
         .ok_or_else(|| RenderError::new("journey_drift", "focus step is no longer declared"))?;
     let alt_text = match &declared.action {
         ValidatedAction::Capture { alt_text, .. }
-        | ValidatedAction::FollowLink { alt_text, .. } => alt_text,
+        | ValidatedAction::FollowLink { alt_text, .. }
+        | ValidatedAction::FillText { alt_text, .. }
+        | ValidatedAction::ClickButton { alt_text, .. }
+        | ValidatedAction::EnsureAbsent { alt_text, .. } => alt_text,
         _ => {
             return Err(RenderError::new(
                 "report_invalid",
@@ -1736,7 +2292,14 @@ fn build_guide(
 ) -> Result<RenderReport, RenderError> {
     let mut guide_steps = Vec::new();
     let mut guide_images = Vec::new();
-    for (declared, executed) in journey.steps.iter().zip(&report.steps) {
+    let main_steps = report
+        .steps
+        .iter()
+        .filter(|step| {
+            journey.schema_version != 5 || step.phase == Some(crate::journey::StepPhase::Journey)
+        })
+        .collect::<Vec<_>>();
+    for (declared, executed) in journey.steps.iter().zip(main_steps) {
         let Some(instruction) = declared.guide_instruction.as_deref() else {
             continue;
         };
@@ -1752,6 +2315,23 @@ fn build_guide(
                             report_sha256,
                             "guide_step_unverified",
                             "a guide action was not executed and effect-verified",
+                        ),
+                        Vec::new(),
+                    );
+                }
+                (alt_text, true)
+            }
+            ValidatedAction::FillText { alt_text, .. }
+            | ValidatedAction::ClickButton { alt_text, .. } => {
+                if executed.observation.action_state != Some(InputActionState::EffectVerified) {
+                    return publish(
+                        root,
+                        not_publishable(
+                            &report,
+                            rendered_journey,
+                            report_sha256,
+                            "guide_step_unverified",
+                            "a guide mutation was not executed and effect-verified",
                         ),
                         Vec::new(),
                     );
@@ -1905,7 +2485,9 @@ fn guide_markdown(
     report: &InputRunReport,
     steps: &[GuideStep],
 ) -> String {
-    let verification_scope = if journey.schema_version >= 3 {
+    let verification_scope = if journey.schema_version == 5 {
+        "the disposable actor, setup state, visible mutations, deterministic checkpoints, focused evidence, and verified fixture cleanup"
+    } else if journey.schema_version >= 3 {
         "the declared checkpoints, authorized actions, and focused evidence"
     } else {
         "the declared checkpoints and captures"
@@ -1922,7 +2504,9 @@ fn guide_markdown(
         journey.source_sha256
     );
     for step in steps {
-        let verification = if step.action_executed {
+        let verification = if journey.schema_version == 5 && step.action_executed {
+            "Crawlson executed this highlighted mutation once against a disposable fixture, verified its declared effect, and later verified fixture cleanup."
+        } else if step.action_executed {
             "Crawlson executed this highlighted link action once and verified its exact declared same-origin destination."
         } else {
             "The highlighted action area was observed in the read-only run. The authored instruction describes the reader's next action; Crawlson does not claim that action was executed."
@@ -1949,12 +2533,24 @@ fn build_findings(
     rendered_journey: RenderedJourney,
     report_sha256: String,
 ) -> Result<RenderReport, RenderError> {
+    let main_steps = report
+        .steps
+        .iter()
+        .filter(|step| {
+            journey.schema_version != 5 || step.phase == Some(crate::journey::StepPhase::Journey)
+        })
+        .collect::<Vec<_>>();
     if report.steps.iter().any(|step| {
         step.status != Outcome::Passed
             && !(step.status == Outcome::Failed
                 && matches!(
                     step.kind.as_str(),
-                    "check_url" | "check_text" | "follow_link"
+                    "check_url"
+                        | "check_text"
+                        | "follow_link"
+                        | "fill_text"
+                        | "click_button"
+                        | "check_absent"
                 ))
     }) {
         let mut result = not_publishable(
@@ -1967,15 +2563,19 @@ fn build_findings(
         result.status = RenderStatus::Error;
         return publish(root, result, Vec::new());
     }
-    let failed_indices: Vec<usize> = report
-        .steps
+    let failed_indices: Vec<usize> = main_steps
         .iter()
         .enumerate()
         .filter(|(_, step)| {
             step.status == Outcome::Failed
                 && matches!(
                     step.kind.as_str(),
-                    "check_url" | "check_text" | "follow_link"
+                    "check_url"
+                        | "check_text"
+                        | "follow_link"
+                        | "fill_text"
+                        | "click_button"
+                        | "check_absent"
                 )
         })
         .map(|(index, _)| index)
@@ -1996,8 +2596,8 @@ fn build_findings(
 
     let mut findings = Vec::new();
     for (finding_index, failed_index) in failed_indices.iter().copied().enumerate() {
-        let failed = &report.steps[failed_index];
-        let reproduction_steps = report.steps[..=failed_index]
+        let failed = main_steps[failed_index];
+        let reproduction_steps = main_steps[..=failed_index]
             .iter()
             .zip(&journey.steps[..=failed_index])
             .map(|(step, declared)| ReproductionStep::new(step, declared))
@@ -2012,7 +2612,10 @@ fn build_findings(
         if let Some(trace) = &artifacts.trace {
             evidence.push(FindingEvidence::from_artifact(trace));
         }
-        if failed.kind == "follow_link" {
+        if matches!(
+            failed.kind.as_str(),
+            "follow_link" | "fill_text" | "click_button"
+        ) {
             for artifact in [
                 artifacts.raw_by_step.get(&failed.id),
                 artifacts.focused_by_step.get(&failed.id),
@@ -2030,7 +2633,7 @@ fn build_findings(
                 });
             }
         }
-        for (declared, executed) in journey.steps.iter().zip(&report.steps) {
+        for (declared, executed) in journey.steps.iter().zip(&main_steps) {
             if declared
                 .evidence_for
                 .iter()
@@ -2073,7 +2676,13 @@ fn build_findings(
         });
     }
     let document = FindingsDocument {
-        schema_version: if journey.schema_version >= 3 { 2 } else { 1 },
+        schema_version: if journey.schema_version == 5 {
+            3
+        } else if journey.schema_version >= 3 {
+            2
+        } else {
+            1
+        },
         run_id: report.run_id.clone(),
         journey: rendered_journey.clone(),
         findings,
@@ -2214,6 +2823,22 @@ enum ReproductionAction {
         selector: String,
         expected_path: String,
     },
+    FillText {
+        selector: String,
+        value_source: &'static str,
+    },
+    ClickButton {
+        selector: String,
+        expected_path: String,
+    },
+    CheckAbsent {
+        selector: String,
+        expected: String,
+    },
+    EnsureAbsent {
+        selector: String,
+        expected_path: String,
+    },
 }
 
 impl From<&ValidatedAction> for ReproductionAction {
@@ -2246,6 +2871,33 @@ impl From<&ValidatedAction> for ReproductionAction {
                 ..
             } => Self::FollowLink {
                 selector: selector.clone(),
+                expected_path: expected_url.path().to_owned(),
+            },
+            ValidatedAction::FillText { selector, .. } => Self::FillText {
+                selector: selector.clone(),
+                value_source: "generated_public_fixture_token",
+            },
+            ValidatedAction::ClickButton {
+                selector,
+                expected_url,
+                ..
+            } => Self::ClickButton {
+                selector: selector.clone(),
+                expected_path: expected_url.path().to_owned(),
+            },
+            ValidatedAction::CheckAbsent {
+                selector,
+                expected_text,
+            } => Self::CheckAbsent {
+                selector: selector.clone(),
+                expected: expected_text.clone(),
+            },
+            ValidatedAction::EnsureAbsent {
+                button_selector,
+                expected_url,
+                ..
+            } => Self::EnsureAbsent {
+                selector: button_selector.clone(),
                 expected_path: expected_url.path().to_owned(),
             },
         }
@@ -2330,6 +2982,31 @@ fn reproduction_markdown(action: &ReproductionAction, failed_finding_kind: Optio
                 escape_markdown(expected_path)
             ),
         },
+        ReproductionAction::FillText { selector, .. } => format!(
+            "Enter a fresh public fixture value in `{}`.",
+            escape_code(selector)
+        ),
+        ReproductionAction::ClickButton {
+            selector,
+            expected_path,
+        } => format!(
+            "Select `{}` once and confirm the visible result at {}.",
+            escape_code(selector),
+            escape_markdown(expected_path)
+        ),
+        ReproductionAction::CheckAbsent { selector, expected } => format!(
+            "Confirm `{}` reports {}.",
+            escape_code(selector),
+            escape_markdown(expected)
+        ),
+        ReproductionAction::EnsureAbsent {
+            selector,
+            expected_path,
+        } => format!(
+            "If the disposable fixture remains, select `{}` once and confirm cleanup at {}.",
+            escape_code(selector),
+            escape_markdown(expected_path)
+        ),
     }
 }
 
@@ -2355,6 +3032,21 @@ fn failure_symptom(step: &InputStep) -> &'static str {
             "The declared link did not expose a valid bounded destination."
         }
         "follow_link" => "The declared link href did not match its expected destination.",
+        "fill_text" if step.observation.visible == Some(false) => {
+            "The declared disposable fixture input was not visible."
+        }
+        "fill_text" if step.observation.enabled == Some(false) => {
+            "The declared disposable fixture input was not enabled."
+        }
+        "fill_text" => "The disposable fixture input effect could not be verified.",
+        "click_button" if step.observation.visible == Some(false) => {
+            "The declared mutation button was not visible."
+        }
+        "click_button" if step.observation.enabled == Some(false) => {
+            "The declared mutation button was not enabled."
+        }
+        "click_button" => "The visible mutation postcondition did not match.",
+        "check_absent" => "The disposable fixture was not initially absent.",
         _ => "Declared checkpoint failed.",
     }
 }
@@ -2382,6 +3074,13 @@ fn finding_kind(step: &InputStep) -> &'static str {
         }
         "follow_link" if step.observation.target_href.is_none() => "link_target_invalid",
         "follow_link" => "link_destination_mismatch",
+        "fill_text" if step.observation.visible == Some(false) => "mutation_input_not_visible",
+        "fill_text" if step.observation.enabled == Some(false) => "mutation_input_not_enabled",
+        "fill_text" => "mutation_input_unverified",
+        "click_button" if step.observation.visible == Some(false) => "mutation_button_not_visible",
+        "click_button" if step.observation.enabled == Some(false) => "mutation_button_not_enabled",
+        "click_button" => "mutation_postcondition_mismatch",
+        "check_absent" => "fixture_not_absent",
         _ => "checkpoint_failure",
     }
 }
@@ -2435,6 +3134,44 @@ fn checkpoint(action: &ValidatedAction, step: &InputStep) -> Checkpoint {
             matched: step.observation.matched,
             action_state: step.observation.action_state.map(action_state_name),
             observed_text_sha256: None,
+        },
+        ValidatedAction::FillText { .. } => Checkpoint {
+            expected: "generated public fixture token".to_owned(),
+            comparison: Some("exact"),
+            observed_path: step
+                .observation
+                .observed_url
+                .as_deref()
+                .map(safe_observed_path),
+            visible: step.observation.visible,
+            enabled: step.observation.enabled,
+            matched: step.observation.matched,
+            action_state: step.observation.action_state.map(action_state_name),
+            observed_text_sha256: step.observation.observed_text_sha256.clone(),
+        },
+        ValidatedAction::ClickButton { expected_url, .. } => Checkpoint {
+            expected: expected_url.path().to_owned(),
+            comparison: Some("exact"),
+            observed_path: step
+                .observation
+                .observed_url
+                .as_deref()
+                .map(safe_observed_path),
+            visible: step.observation.visible,
+            enabled: step.observation.enabled,
+            matched: step.observation.matched,
+            action_state: step.observation.action_state.map(action_state_name),
+            observed_text_sha256: step.observation.observed_text_sha256.clone(),
+        },
+        ValidatedAction::CheckAbsent { expected_text, .. } => Checkpoint {
+            expected: expected_text.clone(),
+            comparison: Some("exact"),
+            observed_path: None,
+            visible: step.observation.visible,
+            enabled: None,
+            matched: step.observation.matched,
+            action_state: None,
+            observed_text_sha256: step.observation.observed_text_sha256.clone(),
         },
         _ => unreachable!("findings are created only from checkpoint actions"),
     }
@@ -2522,6 +3259,7 @@ fn action_state_name(state: InputActionState) -> &'static str {
         InputActionState::NotAttempted => "not_attempted",
         InputActionState::DriverAcknowledged => "driver_acknowledged",
         InputActionState::EffectVerified => "effect_verified",
+        InputActionState::EffectUnverified => "effect_unverified",
         InputActionState::EffectUnknown => "effect_unknown",
     }
 }
@@ -2629,6 +3367,10 @@ fn action_kind(action: &ValidatedAction) -> &'static str {
         ValidatedAction::CheckText { .. } => "check_text",
         ValidatedAction::FollowLink { .. } => "follow_link",
         ValidatedAction::Capture { .. } => "capture",
+        ValidatedAction::FillText { .. } => "fill_text",
+        ValidatedAction::ClickButton { .. } => "click_button",
+        ValidatedAction::CheckAbsent { .. } => "check_absent",
+        ValidatedAction::EnsureAbsent { .. } => "ensure_absent",
     }
 }
 
@@ -2708,6 +3450,7 @@ struct InputRunReport {
     journey: InputJourney,
     target_origin: Option<String>,
     action_authorization: Option<InputActionAuthorization>,
+    mutation_authorization: Option<InputMutationAuthorization>,
     authentication: Option<InputAuthentication>,
     started_at_unix_ms: u64,
     finished_at_unix_ms: u64,
@@ -2720,6 +3463,7 @@ struct InputRunReport {
     steps: Vec<InputStep>,
     artifacts: Vec<InputArtifact>,
     diagnostics: Option<InputDiagnostics>,
+    fixture: Option<InputFixtureLifecycle>,
     cleanup: InputCleanup,
 }
 
@@ -2750,6 +3494,47 @@ struct InputActionAuthorization {
     required: Vec<String>,
     granted: Vec<String>,
     binding_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputMutationAuthorization {
+    required: Vec<String>,
+    granted: Vec<String>,
+    production_required: bool,
+    production_granted: Vec<String>,
+    binding_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputFixtureLifecycle {
+    kind: String,
+    maximum_lifetime_seconds: u64,
+    setup_status: InputFixtureSetupStatus,
+    mutation_attempted: bool,
+    cleanup_status: InputFixtureCleanupStatus,
+    recovery_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InputFixtureSetupStatus {
+    NotStarted,
+    Passed,
+    Failed,
+    Blocked,
+    Error,
+    EffectUnknown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InputFixtureCleanupStatus {
+    NotNeeded,
+    Passed,
+    Failed,
+    EffectUnknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2799,6 +3584,8 @@ struct InputStep {
     sequence: u32,
     id: String,
     title: String,
+    phase: Option<crate::journey::StepPhase>,
+    effect: Option<crate::journey::StepEffect>,
     kind: String,
     status: Outcome,
     started_at_unix_ms: u64,
@@ -2824,6 +3611,7 @@ struct InputObservation {
     detail: Option<String>,
     action_state: Option<InputActionState>,
     action_grant_sha256: Option<String>,
+    guard_command_sequence: Option<u32>,
     action_command_sequence: Option<u32>,
     before_url: Option<String>,
     target_href: Option<String>,
@@ -2873,6 +3661,7 @@ enum InputActionState {
     NotAttempted,
     DriverAcknowledged,
     EffectVerified,
+    EffectUnverified,
     EffectUnknown,
 }
 

@@ -54,7 +54,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [x] Define the 0.8.0 four-target bundle, signed release inventory, raw-payload
+- [x] Define the 0.9.0 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
 - [x] Prove a clean managed install and packaged demo-application HTTP startup
       from every 0.5.1 dry-run bundle without using a production key or
@@ -62,20 +62,20 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
 - [ ] Re-prove the clean managed install and complete packaged authenticated
-      action-and-guide demo from every 0.8.0 dry-run bundle.
-- [ ] Publish signed, immutable 0.8.0 bundles and raw update payloads after the
+      mutation-and-guide demo from every 0.9.0 dry-run bundle.
+- [ ] Publish signed, immutable 0.9.0 bundles and raw update payloads after the
       license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts
 
-- [ ] Define a versioned journey schema that can express:
+- [x] Define a versioned journey schema that can express:
   - [x] journey identity, purpose, and expected user outcome;
   - [x] target and exact authorized origin;
   - [x] user role and authentication requirements without embedding secrets;
   - [x] ordered read-only actions and observable checkpoints;
   - [x] one explicitly authorized, deterministic same-origin link action;
-  - [ ] whether each step is read-only or mutating;
-  - [ ] fixture setup and cleanup requirements;
+  - [x] whether each step is read-only or mutating;
+  - [x] fixture setup and cleanup requirements;
   - [x] evidence to retain; and
   - [x] guide-facing titles, bounded instructions, and explicit checkpoint
         evidence associations when applicable.
@@ -103,8 +103,8 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] Add a v3 `follow_link` capability with an exact per-step runtime grant,
       pre-action focused evidence, one non-retried click, and exact same-origin
       postcondition verification.
-- [ ] Require an explicit mutation capability for journeys that change data.
-- [ ] Refuse mutating production runs unless the exact target and operation were
+- [x] Require an explicit mutation capability for journeys that change data.
+- [x] Refuse mutating production runs unless the exact target and operation were
       explicitly authorized.
 - [x] Add the first replaceable authentication provider for strict external
       `agent-browser` state files and visible role verification.
@@ -116,12 +116,17 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
         and browser evidence.
   - [ ] Add failed-request capture with an explicit secret-redaction contract.
 - [ ] Implement bounded retries that preserve the original failure evidence.
+  - [x] Never retry a mutation after dispatch; an uncertain effect is an error
+        followed by cleanup and recovery handling.
 - [x] Implement cleanup as a reported phase; cleanup failure must remain visible.
 - [x] Apply per-command and overall run deadlines, bounded evidence/cleanup
       grace, and a daemon idle reaper.
 - [ ] Handle operating-system cancellation signals and process crashes without
-      falsely reporting success; the 0.2 deadline/reaper does not emit a final
-      report if Crawlson itself is forcibly terminated.
+      falsely reporting success. V5 handles normal interrupt signals by entering
+      cleanup and leaves a durable exact-origin recovery barrier after an
+      interrupted or unknown mutation. The exact journey can visibly recover a
+      forced-termination barrier, but the terminated process still cannot emit
+      its own final report.
 
 ## Phase 3: turn runs into findings
 
@@ -173,7 +178,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Document supported targets and the authorization model prominently.
 - [x] Provide a self-contained demo application and journeys that require no
       third-party credentials.
-- [ ] Add unit tests for schema and safety policy plus end-to-end tests for pass,
+- [x] Add unit tests for schema and safety policy plus end-to-end tests for pass,
       fail, blocked, error, mutation denial, and cleanup failure.
   - [x] Cover the read-only pass/fail/blocked/error and cleanup contracts with a
         fake process and a required-in-CI real agent-browser loopback fixture.
@@ -182,7 +187,12 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
   - [x] Cover authenticated pass, missing/unsupported/invalid state, driver-load
         failure, visible verification failure, temporary cleanup, and retained
         output privacy with fake and real browser drivers.
-  - [ ] Add mutation-denial coverage when a mutation contract exists.
+  - [x] Cover missing, malformed, duplicate, extra, and production mutation
+        grants before browser launch, plus unexpected mutation flags on legacy
+        journeys.
+  - [x] Prove with real Chromium that the v5 guard permits the exact-origin
+        mutation while blocking cross-port `fetch`, `sendBeacon`, and WebSocket
+        traffic to a sensitivity-checked loopback trap.
 - [x] Prove that a clean source build can run the demo and reproduce the
       documented artifacts.
 - [ ] Prove that a clean managed installation from each non-publishing dry-run
@@ -205,10 +215,13 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Baseline/diff strategy for UI changes and nondeterministic content
 - [ ] Artifact storage and redaction policy
 - [ ] Accessibility, console, network, and visual checks in the default run
-- [ ] Fixture lifecycle and parallel-run isolation
+- [x] Fixture lifecycle and same-origin mutation isolation through explicit
+      setup/main/cleanup phases, public per-run fixture values, and a durable
+      exact-origin recovery barrier
 - [x] First application-neutral extension point for external authentication
-      state and visible role verification; login, hosted-secret, and fixture
-      setup providers remain future contracts.
+      state and visible role verification; login and hosted-secret providers
+      remain future contracts. V5 fixture setup and cleanup use the visible UI
+      and stay independent of application-specific fixture adapters.
 
 ## MVP definition of done
 

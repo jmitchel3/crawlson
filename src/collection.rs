@@ -1043,6 +1043,12 @@ fn prepare_entry(
                         "executed_and_verified",
                         "Crawlson executed this highlighted link action once and verified its exact declared same-origin destination.",
                     ),
+                    crate::journey::ValidatedAction::FillText { alt_text, .. }
+                    | crate::journey::ValidatedAction::ClickButton { alt_text, .. } => (
+                        alt_text.clone(),
+                        "executed_and_verified",
+                        "Crawlson executed this highlighted mutation once against a disposable fixture, verified its declared effect, and later verified fixture cleanup.",
+                    ),
                     _ => unreachable!("guide-ready steps are focused evidence actions"),
                 };
                 PreparedGuideStep {

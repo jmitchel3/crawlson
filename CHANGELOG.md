@@ -6,6 +6,44 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-27
+
+### Added
+
+- Journey v5, run-report v4, and findings v3 contracts for one disposable,
+  authenticated visible-UI mutation with explicit setup, main, and cleanup
+  phases plus per-step read-only/mutating classification.
+- Narrow `fill_text`, exact POST `click_button`, fixture `check_absent`, and
+  idempotent `ensure_absent` actions using a generated public fixture token,
+  one-shot dispatch, deterministic effect states, and focused pre-action
+  evidence.
+- Exact `--allow-mutation JOURNEY@REVISION:STEP` grants for every mutating main
+  and cleanup action, plus a second complete `--allow-production-mutation` set
+  for non-loopback targets.
+- A durable, non-secret exact-origin recovery barrier that blocks another
+  mutation until visible fixture cleanup is verified, including bounded cleanup
+  grace after main pass, failure, error, timeout, or handled interruption. The
+  user-global authority cannot be bypassed with another output directory, and
+  rerunning the exact journey performs recovery-only visible cleanup.
+- Mutation-specific structured findings and sanitized reproduction actions, and
+  executed guide claims only after both the action effect and fixture cleanup
+  verify.
+
+### Security
+
+- Mutating runs require an explicitly selected Chromium or Chrome for Testing
+  executable and an owned Manifest V3 Declarative Net Request extension that
+  blocks browser HTTP(S), WebSocket, and WebTransport traffic outside the exact
+  authorized scheme, host, and effective port.
+- A per-run exact-origin extension marker is attested immediately before every
+  mutation. Extension bytes and paths are rechecked, form controls are narrowed
+  to simple IDs, forms require exact same-origin POST actions without overrides,
+  and no attempted fill or click is retried.
+- Missing or mismatched target, action, mutation, production, authentication,
+  browser, fixture, and recovery preconditions fail closed. Unknown effects or
+  cleanup failures cannot produce a guide or finding and preserve the original
+  execution result separately from the final error.
+
 ## [0.8.0] - 2026-07-27
 
 ### Added

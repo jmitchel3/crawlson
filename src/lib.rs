@@ -6,6 +6,8 @@ pub mod driver;
 pub mod focus;
 pub mod install;
 pub mod journey;
+pub mod net_guard;
+pub mod recovery;
 pub mod release;
 pub mod render;
 pub mod runner;

@@ -112,6 +112,9 @@ interior is unchanged, checks that surrounding pixels are dimmed, validates the
 guide's local image, verifies deterministic finding provenance, confirms the
 real driver executed one link click and observed the exact destination, and
 scans the complete authenticated run for its disposable state path and value.
+Its mutating case also runs `fetch`, `sendBeacon`, and `WebSocket` probes against
+a second loopback port, proves that port receives no requests, and still requires
+the exact-origin create-and-cleanup flow to pass.
 
 ## CI contract
 

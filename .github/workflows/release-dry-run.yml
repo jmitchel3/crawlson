@@ -29,26 +29,125 @@ jobs:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             exe_suffix: ""
+            agent_browser_binary: agent-browser-linux-x64
           - runner: macos-14
             target: aarch64-apple-darwin
             exe_suffix: ""
+            agent_browser_binary: agent-browser-darwin-arm64
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             exe_suffix: ""
+            agent_browser_binary: agent-browser-darwin-x64
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             exe_suffix: ".exe"
+            agent_browser_binary: agent-browser-win32-x64.exe
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       EXE_SUFFIX: ${{ matrix.exe_suffix }}
       RELEASE_TARGET: ${{ matrix.target }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          check-latest: false
       - name: Prepare package output and logs
         shell: bash
         run: mkdir -p "release-output/$RELEASE_TARGET/logs"
+      - name: Install supported agent-browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          logs="release-output/$RELEASE_TARGET/logs"
+          npm install --global --ignore-scripts --no-audit --no-fund agent-browser@0.26.0 \
+            2>&1 | tee "$logs/agent-browser-package.log"
+          agent_browser_root="$(npm root --global)"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            agent_browser_root="$(cygpath -u "$agent_browser_root")"
+          fi
+          agent_browser="$agent_browser_root/agent-browser/bin/${{ matrix.agent_browser_binary }}"
+          test -f "$agent_browser"
+          chmod 755 "$agent_browser"
+          test -x "$agent_browser"
+          version="$("$agent_browser" --version)"
+          printf '%s\n' "$version" | tee "$logs/agent-browser-version.txt"
+          test "$version" = "agent-browser 0.26.0"
+
+          printf 'AGENT_BROWSER_REAL_BIN=%s\n' "$agent_browser" >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            "$agent_browser" install --with-deps \
+              2>&1 | tee "$logs/agent-browser-install.log"
+          else
+            "$agent_browser" install \
+              2>&1 | tee "$logs/agent-browser-install.log"
+          fi
+          browser_cache="$(cd "$HOME/.agent-browser/browsers" && pwd -P)"
+          printf 'AGENT_BROWSER_BROWSERS_PATH=%s\n' "$browser_cache" \
+            >> "$GITHUB_ENV"
+      - name: Discover extension-capable browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          logs="release-output/$RELEASE_TARGET/logs"
+          extension_browser=""
+          while IFS= read -r candidate; do
+            case "$candidate" in
+              */chrome-*/chrome|\
+              */chrome-*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+              */chrome-*/chrome.exe|\
+              */chrome-*/chrome-linux*/chrome|\
+              */chrome-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+              */chrome-*/chrome-win*/chrome.exe|\
+              */chromium-*/chrome-linux*/chrome|\
+              */chromium-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+              */chromium-*/chrome-win*/chrome.exe)
+                test -f "$candidate" || continue
+                test -x "$candidate" || continue
+                if [[ "$RUNNER_OS" == "Windows" ]]; then
+                  product_version="$(
+                    CANDIDATE_WINDOWS="$(cygpath -w "$candidate")" \
+                      powershell.exe -NoProfile -NonInteractive -Command \
+                      '$item = Get-Item -LiteralPath $env:CANDIDATE_WINDOWS; $item.VersionInfo.ProductVersion' \
+                      | tr -d '\r'
+                  )"
+                  test -n "$product_version"
+                  browser_version="Chrome for Testing $product_version"
+                else
+                  browser_version="$("$candidate" --version 2>/dev/null || true)"
+                fi
+                if [[ "$browser_version" == *"Chrome for Testing"* \
+                  || "$browser_version" == *"Chromium"* ]]; then
+                  extension_browser="$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")"
+                  printf '%s\n' "$browser_version" \
+                    > "$logs/extension-browser-version.txt"
+                  break
+                fi
+                ;;
+            esac
+          done < <(find "$AGENT_BROWSER_BROWSERS_PATH" -type f -print | sort -r)
+          test -n "$extension_browser"
+          printf 'EXTENSION_BROWSER=%s\n' "$extension_browser" >> "$GITHUB_ENV"
+      - name: Require upstream launch diagnostics where reliable
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          doctor_log="release-output/$RELEASE_TARGET/logs/agent-browser-doctor.json"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # agent-browser 0.26 doctor does not return after its Windows launch
+            # probe. The mandatory installed complete demo below exercises the
+            # real driver and browser on Windows, so record that stronger proof
+            # instead of allowing the advisory probe to hang this matrix.
+            printf '%s\n' \
+              '{"status":"deferred","reason":"covered-by-installed-complete-demo"}' \
+              > "$doctor_log"
+            exit 0
+          fi
+          env -u CI "$AGENT_BROWSER_REAL_BIN" doctor --offline --json \
+            2>&1 | tee "release-output/$RELEASE_TARGET/logs/agent-browser-doctor.json"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.92.0 --profile minimal
       - name: Select pinned Rust toolchain
@@ -178,6 +277,47 @@ jobs:
             "$logs/installed-clson-version.json"
           cmp -s "$logs/bundled-crawlson-version.json" \
             "$logs/installed-crawlson-version.json"
+          printf 'INSTALL_PREFIX=%s\n' "$prefix" >> "$GITHUB_ENV"
+          printf 'INSTALL_STATE=%s\n' "$state" >> "$GITHUB_ENV"
+      - name: Require installed complete browser demo and alias guide check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          logs="release-output/$RELEASE_TARGET/logs"
+          demo_output="release-output/$RELEASE_TARGET/installed-demo"
+          installed_crawlson="$INSTALL_PREFIX/crawlson$EXE_SUFFIX"
+          installed_clson="$INSTALL_PREFIX/clson$EXE_SUFFIX"
+          bundled_demo="$BUNDLE_ROOT/bin/crawlson-demo$EXE_SUFFIX"
+
+          browser_session=(bash)
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # agent-browser keeps extension-bearing sessions headed so their
+            # content scripts run. The Linux runner therefore needs a display.
+            command -v xvfb-run >/dev/null
+            browser_session=(
+              xvfb-run
+              --auto-servernum
+              --server-args="-screen 0 1280x720x24"
+              bash
+            )
+          fi
+
+          "${browser_session[@]}" "$BUNDLE_ROOT/scripts/demo.sh" \
+            --crawlson-bin "$installed_crawlson" \
+            --demo-bin "$bundled_demo" \
+            --agent-browser "$AGENT_BROWSER_REAL_BIN" \
+            --browser-executable "$EXTENSION_BROWSER" \
+            --output-dir "$demo_output" \
+            2>&1 | tee "$logs/installed-complete-demo.log"
+
+          CRAWLSON_HOME="$INSTALL_STATE" "$installed_clson" --json guides check \
+            "$demo_output/guide-collection.toml" \
+            --output "$demo_output/guide-site" \
+            > "$logs/installed-clson-guide-check.json"
+          grep -F '"status":"ready"' \
+            "$logs/installed-clson-guide-check.json" >/dev/null
+          grep -F '"guides":4' \
+            "$logs/installed-clson-guide-check.json" >/dev/null
       - name: Require packaged demo HTTP and owned termination
         if: runner.os != 'Windows'
         shell: bash

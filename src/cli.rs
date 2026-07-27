@@ -42,7 +42,7 @@ enum Commands {
     /// Install a verified release bundle without elevating privileges.
     Install(InstallArgs),
 
-    /// Run one validated journey with explicit target and action authorization.
+    /// Run one validated journey with explicit target, action, and mutation authorization.
     Run(RunArgs),
 
     /// Render findings or a guide from one completed, verified run.
@@ -99,7 +99,15 @@ struct RunArgs {
     #[arg(long, value_name = "JOURNEY@REVISION:STEP")]
     allow_action: Vec<String>,
 
-    /// External agent-browser state for a journey v4 authentication contract.
+    /// Authorize one exact mutating step as JOURNEY@REVISION:STEP.
+    #[arg(long, value_name = "JOURNEY@REVISION:STEP")]
+    allow_mutation: Vec<String>,
+
+    /// Reconfirm one exact non-loopback mutation as JOURNEY@REVISION:STEP.
+    #[arg(long, value_name = "JOURNEY@REVISION:STEP")]
+    allow_production_mutation: Vec<String>,
+
+    /// External agent-browser state for a journey v4 or v5 authentication contract.
     #[arg(long, value_name = "PATH")]
     auth_state: Option<PathBuf>,
 
@@ -110,6 +118,10 @@ struct RunArgs {
     /// Exact agent-browser executable to use instead of searching PATH.
     #[arg(long, value_name = "PATH")]
     agent_browser: Option<PathBuf>,
+
+    /// Extension-capable Chromium/Chrome for Testing executable required by mutating journeys.
+    #[arg(long, value_name = "PATH")]
+    browser_executable: Option<PathBuf>,
 
     /// Per-command driver deadline; must remain below agent-browser's IPC limit.
     #[arg(
@@ -222,9 +234,12 @@ where
                 journey_path: args.journey,
                 allowed_origin: args.allow_origin,
                 allowed_actions: args.allow_action,
+                allowed_mutations: args.allow_mutation,
+                allowed_production_mutations: args.allow_production_mutation,
                 auth_state: args.auth_state,
                 output_directory: args.output_dir,
                 agent_browser: args.agent_browser,
+                browser_executable: args.browser_executable,
                 action_timeout: std::time::Duration::from_secs(args.action_timeout_seconds),
                 run_timeout: std::time::Duration::from_secs(args.run_timeout_seconds),
             });

@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
@@ -16,6 +18,8 @@ use crate::driver::{
 };
 use crate::focus::{self, CssBox, FocusRequest, Viewport};
 use crate::journey::{self, Origin, TextComparison, ValidatedAction, ValidatedJourney, hex_digest};
+use crate::journey::{MutationValue, StepEffect, StepPhase};
+use crate::recovery::{RecoveryRecord, RecoveryStore};
 use crate::{CommandResult, VERSION};
 
 pub const EXIT_PASSED: u8 = 0;
@@ -28,9 +32,12 @@ pub struct RunOptions {
     pub journey_path: PathBuf,
     pub allowed_origin: Option<String>,
     pub allowed_actions: Vec<String>,
+    pub allowed_mutations: Vec<String>,
+    pub allowed_production_mutations: Vec<String>,
     pub auth_state: Option<PathBuf>,
     pub output_directory: PathBuf,
     pub agent_browser: Option<PathBuf>,
+    pub browser_executable: Option<PathBuf>,
     pub action_timeout: Duration,
     pub run_timeout: Duration,
 }
@@ -76,6 +83,8 @@ pub struct RunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_authorization: Option<ActionAuthorizationReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation_authorization: Option<MutationAuthorizationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub authentication: Option<AuthenticationReport>,
     pub started_at_unix_ms: u64,
     pub finished_at_unix_ms: u64,
@@ -89,6 +98,8 @@ pub struct RunReport {
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<DiagnosticsSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<FixtureLifecycleReport>,
     pub cleanup: CleanupReport,
 }
 
@@ -97,6 +108,45 @@ pub struct ActionAuthorizationReport {
     pub required: Vec<String>,
     pub granted: Vec<String>,
     pub binding_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MutationAuthorizationReport {
+    pub required: Vec<String>,
+    pub granted: Vec<String>,
+    pub production_required: bool,
+    pub production_granted: Vec<String>,
+    pub binding_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FixtureLifecycleReport {
+    pub kind: &'static str,
+    pub maximum_lifetime_seconds: u64,
+    pub setup_status: FixtureSetupStatus,
+    pub mutation_attempted: bool,
+    pub cleanup_status: FixtureCleanupStatus,
+    pub recovery_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureSetupStatus {
+    NotStarted,
+    Passed,
+    Failed,
+    Blocked,
+    Error,
+    EffectUnknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureCleanupStatus {
+    NotNeeded,
+    Passed,
+    Failed,
+    EffectUnknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +201,10 @@ pub struct StepReport {
     pub sequence: u32,
     pub id: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<StepPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<StepEffect>,
     pub kind: &'static str,
     pub status: RunOutcome,
     pub started_at_unix_ms: u64,
@@ -191,6 +245,8 @@ pub struct StepObservation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_grant_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard_command_sequence: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub action_command_sequence: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before_url: Option<String>,
@@ -204,6 +260,7 @@ pub enum ActionState {
     NotAttempted,
     DriverAcknowledged,
     EffectVerified,
+    EffectUnverified,
     EffectUnknown,
 }
 
@@ -308,11 +365,12 @@ pub fn run(options: RunOptions) -> RunReport {
     report.journey.revision = Some(journey.meta.revision);
     report.target_origin = Some(journey.origin.to_string());
     report.schema_version = match journey.schema_version {
+        5 => 4,
         4 => 3,
         3 => 2,
         _ => 1,
     };
-    if journey.schema_version == 4 {
+    if matches!(journey.schema_version, 4 | 5) {
         let authentication = journey
             .authentication
             .as_ref()
@@ -329,6 +387,20 @@ pub fn run(options: RunOptions) -> RunReport {
             binding_sha256: hex_digest(authentication_binding(&journey).as_bytes()),
         });
     }
+    if journey.schema_version == 5 {
+        let fixture = journey
+            .fixture
+            .as_ref()
+            .expect("journey v5 fixture was validated");
+        report.fixture = Some(FixtureLifecycleReport {
+            kind: "self_expiring_ui",
+            maximum_lifetime_seconds: fixture.maximum_lifetime_seconds,
+            setup_status: FixtureSetupStatus::NotStarted,
+            mutation_attempted: false,
+            cleanup_status: FixtureCleanupStatus::NotNeeded,
+            recovery_required: false,
+        });
+    }
     // Build action provenance before the other fail-closed preconditions so a
     // v3 report remains structurally renderable even when target authorization
     // or authentication blocks execution first. Preserve those earlier safety
@@ -337,6 +409,12 @@ pub fn run(options: RunOptions) -> RunReport {
         &journey,
         &options.allowed_actions,
         &mut report.action_authorization,
+    );
+    let mutation_authorization = authorize_mutations(
+        &journey,
+        &options.allowed_mutations,
+        &options.allowed_production_mutations,
+        &mut report.mutation_authorization,
     );
 
     let Some(allowed_origin) = options.allowed_origin.as_deref() else {
@@ -386,8 +464,56 @@ pub fn run(options: RunOptions) -> RunReport {
         finish_blocked(&mut report, code, message);
         return finalize(report, overall_start, &run_root);
     }
+    if let Err((code, message)) = mutation_authorization {
+        finish_blocked(&mut report, code, message);
+        return finalize(report, overall_start, &run_root);
+    }
 
-    let authentication_state = if journey.schema_version == 4 {
+    let (recovery_store, pending_recovery) = if journey.schema_version == 5 {
+        let store = match RecoveryStore::global(&options.output_directory) {
+            Ok(store) => store,
+            Err(error) => {
+                finish_blocked(&mut report, error.code(), error.to_string());
+                return finalize(report, overall_start, &run_root);
+            }
+        };
+        match store.check_pending(&journey.origin) {
+            Ok(None) => (Some(store), None),
+            Ok(Some(record)) => {
+                if let Some(fixture) = &mut report.fixture {
+                    fixture.recovery_required = true;
+                }
+                let cleanup_step_ids = journey
+                    .cleanup_steps
+                    .iter()
+                    .map(|step| step.id.clone())
+                    .collect::<Vec<_>>();
+                if record.journey_id != journey.meta.id
+                    || record.revision != journey.meta.revision
+                    || record.source_sha256 != journey.source_sha256
+                    || record.target_origin != journey.origin.to_string()
+                    || record.cleanup_step_ids != cleanup_step_ids
+                {
+                    finish_blocked(
+                        &mut report,
+                        "recovery_pending_mismatch",
+                        "a prior mutation for this exact origin requires its exact original journey and cleanup contract"
+                            .to_owned(),
+                    );
+                    return finalize(report, overall_start, &run_root);
+                }
+                (Some(store), Some(record))
+            }
+            Err(error) => {
+                finish_blocked(&mut report, error.code(), error.to_string());
+                return finalize(report, overall_start, &run_root);
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    let authentication_state = if matches!(journey.schema_version, 4 | 5) {
         let authentication = journey
             .authentication
             .as_ref()
@@ -437,6 +563,24 @@ pub fn run(options: RunOptions) -> RunReport {
         None
     };
 
+    if journey.schema_version == 5 && options.browser_executable.is_none() {
+        finish_blocked(
+            &mut report,
+            "extension_browser_missing",
+            "mutating journeys require --browser-executable pointing to Chromium or Chrome for Testing"
+                .to_owned(),
+        );
+        return finalize(report, overall_start, &run_root);
+    }
+    if journey.schema_version != 5 && options.browser_executable.is_some() {
+        finish_blocked(
+            &mut report,
+            "extension_browser_unexpected",
+            "--browser-executable is accepted only for a mutating journey".to_owned(),
+        );
+        return finalize(report, overall_start, &run_root);
+    }
+
     let doctor = doctor::run(DoctorOptions {
         executable: options.agent_browser,
     });
@@ -468,16 +612,30 @@ pub fn run(options: RunOptions) -> RunReport {
     let session = session_name(&run_id);
     report.driver.session = Some(session.clone());
     let has_link_action = journey
-        .steps
-        .iter()
-        .any(|step| matches!(step.action, ValidatedAction::FollowLink { .. }));
-    let policy_mode = match (journey.schema_version == 4, has_link_action) {
-        (false, false) => DriverPolicyMode::ReadOnly,
-        (false, true) => DriverPolicyMode::FollowLink,
-        (true, false) => DriverPolicyMode::AuthenticatedReadOnly,
-        (true, true) => DriverPolicyMode::AuthenticatedFollowLink,
+        .phase_steps()
+        .any(|(_, step)| matches!(step.action, ValidatedAction::FollowLink { .. }));
+    let has_mutation = journey.mutating_steps().next().is_some();
+    let policy_mode = match (
+        matches!(journey.schema_version, 4 | 5),
+        has_link_action,
+        has_mutation,
+    ) {
+        (false, false, false) => DriverPolicyMode::ReadOnly,
+        (false, true, false) => DriverPolicyMode::FollowLink,
+        (true, false, false) => DriverPolicyMode::AuthenticatedReadOnly,
+        (true, true, false) => DriverPolicyMode::AuthenticatedFollowLink,
+        (false, false, true) => DriverPolicyMode::Mutation,
+        (true, false, true) => DriverPolicyMode::AuthenticatedMutation,
+        _ => {
+            finish_error(
+                &mut report,
+                "journey_invalid",
+                "unsupported combination of browser action capabilities".to_owned(),
+            );
+            return finalize(report, overall_start, &run_root);
+        }
     };
-    let mut driver = match AgentBrowserDriver::new_with_policy_mode(
+    let mut driver = match AgentBrowserDriver::new_with_policy_mode_and_browser(
         executable,
         &run_root,
         journey.origin.clone(),
@@ -485,6 +643,7 @@ pub fn run(options: RunOptions) -> RunReport {
         options.action_timeout,
         options.run_timeout,
         policy_mode,
+        options.browser_executable.as_deref(),
     ) {
         Ok(driver) => driver,
         Err(error) => {
@@ -497,13 +656,26 @@ pub fn run(options: RunOptions) -> RunReport {
         }
     };
 
-    execute(
-        &journey,
-        &run_root,
-        &mut driver,
-        authentication_state,
-        &mut report,
-    );
+    if journey.schema_version == 5 {
+        execute_mutating(
+            &journey,
+            &run_root,
+            &run_id,
+            &mut driver,
+            authentication_state,
+            recovery_store.expect("v5 recovery store was initialized"),
+            pending_recovery,
+            &mut report,
+        );
+    } else {
+        execute(
+            &journey,
+            &run_root,
+            &mut driver,
+            authentication_state,
+            &mut report,
+        );
+    }
     report.driver.commands = driver.records();
     finalize(report, overall_start, &run_root)
 }
@@ -606,6 +778,125 @@ fn action_authorization_binding(
     )
 }
 
+fn authorize_mutations(
+    journey: &ValidatedJourney,
+    supplied: &[String],
+    supplied_production: &[String],
+    report: &mut Option<MutationAuthorizationReport>,
+) -> Result<(), (&'static str, String)> {
+    let required = journey
+        .mutating_steps()
+        .map(|step| action_grant(journey, &step.id))
+        .collect::<BTreeSet<_>>();
+    let production_required = !required.is_empty() && !journey.origin.is_literal_loopback();
+    let syntax_valid = supplied.iter().all(|grant| valid_action_grant(grant))
+        && supplied_production
+            .iter()
+            .all(|grant| valid_action_grant(grant));
+    let granted = supplied.iter().cloned().collect::<BTreeSet<_>>();
+    let production_granted = supplied_production.iter().cloned().collect::<BTreeSet<_>>();
+    let required_values = required.iter().cloned().collect::<Vec<_>>();
+    let granted_values = granted.iter().cloned().collect::<Vec<_>>();
+    let production_values = production_granted.iter().cloned().collect::<Vec<_>>();
+    if journey.schema_version == 5 || !supplied.is_empty() || !supplied_production.is_empty() {
+        let binding = mutation_authorization_binding(
+            journey,
+            &required_values,
+            &granted_values,
+            production_required,
+            &production_values,
+        );
+        *report = Some(MutationAuthorizationReport {
+            required: required_values.clone(),
+            granted: granted_values,
+            production_required,
+            production_granted: production_values,
+            binding_sha256: hex_digest(binding.as_bytes()),
+        });
+    }
+    if !syntax_valid
+        || granted.len() != supplied.len()
+        || production_granted.len() != supplied_production.len()
+    {
+        return Err((
+            "mutation_authorization_invalid",
+            "mutation authorization grants must be valid and unique".to_owned(),
+        ));
+    }
+    if required.is_empty() {
+        return if granted.is_empty() && production_granted.is_empty() {
+            Ok(())
+        } else {
+            Err((
+                "mutation_authorization_unexpected",
+                "this journey declares no mutation to authorize".to_owned(),
+            ))
+        };
+    }
+    if granted != required {
+        let missing = required.difference(&granted).cloned().collect::<Vec<_>>();
+        let message = if missing.is_empty() {
+            "unexpected mutation authorization grant set".to_owned()
+        } else {
+            format!(
+                "explicit mutation authorization is required; rerun with {}",
+                missing
+                    .iter()
+                    .map(|grant| format!("--allow-mutation {grant}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        return Err(("mutation_authorization_mismatch", message));
+    }
+    if production_required && production_granted != required {
+        let missing = required
+            .difference(&production_granted)
+            .cloned()
+            .collect::<Vec<_>>();
+        let message = if missing.is_empty() {
+            "unexpected production mutation authorization grant set".to_owned()
+        } else {
+            format!(
+                "non-loopback mutations require an extra exact production confirmation; rerun with {}",
+                missing
+                    .iter()
+                    .map(|grant| format!("--allow-production-mutation {grant}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        return Err(("production_mutation_authorization_mismatch", message));
+    }
+    if !production_required && !production_granted.is_empty() {
+        return Err((
+            "production_mutation_authorization_unexpected",
+            "literal-loopback mutations must not carry a production mutation grant".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn mutation_authorization_binding(
+    journey: &ValidatedJourney,
+    required: &[String],
+    granted: &[String],
+    production_required: bool,
+    production_granted: &[String],
+) -> String {
+    format!(
+        "crawlson-mutation-grant-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nrequired={}\ngranted={}\nproduction_required={}\nproduction_granted={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        required.join(","),
+        granted.join(","),
+        production_required,
+        production_granted.join(",")
+    )
+}
+
 fn authentication_binding(journey: &ValidatedJourney) -> String {
     let authentication = journey
         .authentication
@@ -656,6 +947,511 @@ fn valid_action_identifier(value: &str) -> bool {
 
 fn action_grant(journey: &ValidatedJourney, step_id: &str) -> String {
     format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mutating(
+    journey: &ValidatedJourney,
+    run_root: &Path,
+    run_id: &str,
+    driver: &mut dyn BrowserDriver,
+    authentication_state: Option<ValidatedState>,
+    recovery_store: RecoveryStore,
+    pending_recovery: Option<RecoveryRecord>,
+    report: &mut RunReport,
+) {
+    let interrupted = match mutation_interrupt_flag() {
+        Ok(flag) => flag,
+        Err(message) => {
+            finish_error(report, "signal_handler_unavailable", message);
+            return;
+        }
+    };
+    let mut prepared = false;
+    let mut trace_started = false;
+    let mut primary = RunOutcome::Passed;
+    let mut primary_reason = Reason {
+        code: "journey_passed".to_owned(),
+        message:
+            "all setup, visible mutations, deterministic checks, evidence, and fixture cleanup completed"
+                .to_owned(),
+    };
+
+    match driver.prepare() {
+        Ok(()) => prepared = true,
+        Err(error) => set_driver_error(&mut primary, &mut primary_reason, error),
+    }
+    if primary == RunOutcome::Passed {
+        let Some(authentication_state) = authentication_state else {
+            set_authentication_status(report, AuthenticationStatus::Missing);
+            primary = RunOutcome::Blocked;
+            primary_reason = Reason {
+                code: "authentication_state_missing".to_owned(),
+                message: "mutating journeys require disposable authenticated state".to_owned(),
+            };
+            finish_mutating_session(
+                journey,
+                run_root,
+                driver,
+                prepared,
+                trace_started,
+                primary,
+                primary_reason,
+                report,
+            );
+            return;
+        };
+        match authentication_state.stage() {
+            Ok(staged) => {
+                let load_result = driver.load_authentication(staged.path());
+                let cleanup_result = staged.close();
+                if load_result.is_err() || cleanup_result.is_err() {
+                    set_authentication_status(report, AuthenticationStatus::LoadFailed);
+                    primary = RunOutcome::Error;
+                    primary_reason = Reason {
+                        code: "authentication_state_load_failed".to_owned(),
+                        message:
+                            "agent-browser could not safely load disposable authentication state"
+                                .to_owned(),
+                    };
+                }
+            }
+            Err(_) => {
+                set_authentication_status(report, AuthenticationStatus::LoadFailed);
+                primary = RunOutcome::Error;
+                primary_reason = Reason {
+                    code: "authentication_state_load_failed".to_owned(),
+                    message: "agent-browser could not safely stage disposable authentication state"
+                        .to_owned(),
+                };
+            }
+        }
+        drop(authentication_state);
+    }
+    if primary == RunOutcome::Passed {
+        match driver.start_trace() {
+            Ok(()) => trace_started = true,
+            Err(error) => set_driver_error(&mut primary, &mut primary_reason, error),
+        }
+    }
+
+    let fixture_token = fixture_token(run_id);
+    let mut has_navigated = false;
+    let mut sequence = 0usize;
+    if primary == RunOutcome::Passed {
+        let setup_limit = pending_recovery
+            .as_ref()
+            .map_or(journey.setup_steps.len(), |_| {
+                let verification_step = journey
+                    .authentication
+                    .as_ref()
+                    .and_then(|authentication| authentication.verification_step.as_deref())
+                    .expect("v5 authentication verification was validated");
+                journey
+                    .setup_steps
+                    .iter()
+                    .position(|step| step.id == verification_step)
+                    .expect("v5 authentication verification is a setup step")
+                    + 1
+            });
+        for step in &journey.setup_steps[..setup_limit] {
+            if interrupted.load(Ordering::Acquire) {
+                primary = RunOutcome::Error;
+                primary_reason = Reason {
+                    code: "run_interrupted".to_owned(),
+                    message: "run was interrupted before mutation dispatch".to_owned(),
+                };
+                break;
+            }
+            let (status, reason, navigated) = execute_v5_step(
+                journey,
+                run_root,
+                driver,
+                step,
+                StepPhase::Setup,
+                sequence,
+                has_navigated,
+                &fixture_token,
+                report,
+            );
+            sequence += 1;
+            has_navigated |= navigated;
+            let verifies_auth = report
+                .authentication
+                .as_ref()
+                .is_some_and(|auth| auth.verification_step == step.id);
+            if status != RunOutcome::Passed {
+                primary = if verifies_auth {
+                    set_authentication_status(report, AuthenticationStatus::Blocked);
+                    RunOutcome::Blocked
+                } else if status == RunOutcome::Failed {
+                    RunOutcome::Blocked
+                } else {
+                    status
+                };
+                primary_reason = if verifies_auth {
+                    Reason {
+                        code: "authentication_verification_failed".to_owned(),
+                        message: "the disposable actor was not verified through the visible UI"
+                            .to_owned(),
+                    }
+                } else if status == RunOutcome::Failed {
+                    Reason {
+                        code: "fixture_setup_failed".to_owned(),
+                        message: "the disposable fixture setup precondition did not pass"
+                            .to_owned(),
+                    }
+                } else {
+                    reason
+                };
+                break;
+            }
+            if verifies_auth {
+                set_authentication_status(report, AuthenticationStatus::Verified);
+            }
+        }
+    }
+    if let Some(fixture) = &mut report.fixture {
+        fixture.setup_status = if pending_recovery.is_some() && primary == RunOutcome::Passed {
+            FixtureSetupStatus::Blocked
+        } else {
+            match primary {
+                RunOutcome::Passed => FixtureSetupStatus::Passed,
+                RunOutcome::Failed => FixtureSetupStatus::Failed,
+                RunOutcome::Blocked => FixtureSetupStatus::Blocked,
+                RunOutcome::Error => FixtureSetupStatus::Error,
+            }
+        };
+    }
+
+    let mut recovery = None;
+    if primary == RunOutcome::Passed {
+        let record = pending_recovery.clone().unwrap_or_else(|| RecoveryRecord {
+            schema_version: 1,
+            journey_id: journey.meta.id.clone(),
+            revision: journey.meta.revision,
+            source_sha256: journey.source_sha256.clone(),
+            target_origin: journey.origin.to_string(),
+            run_id: run_id.to_owned(),
+            run_directory: run_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            cleanup_step_ids: journey
+                .cleanup_steps
+                .iter()
+                .map(|step| step.id.clone())
+                .collect(),
+            created_at_unix_ms: unix_ms(),
+        });
+        let recovery_result = if pending_recovery.is_some() {
+            recovery_store.resume(record, run_root)
+        } else {
+            recovery_store.begin(record, run_root)
+        };
+        match recovery_result {
+            Ok(active) => recovery = Some(active),
+            Err(error) => {
+                primary = RunOutcome::Blocked;
+                primary_reason = Reason {
+                    code: error.code().to_owned(),
+                    message: error.to_string(),
+                };
+                if let Some(fixture) = &mut report.fixture {
+                    fixture.recovery_required = matches!(
+                        error,
+                        crate::recovery::RecoveryError::PartialBegin
+                            | crate::recovery::RecoveryError::Pending
+                    );
+                }
+            }
+        }
+    }
+
+    if primary == RunOutcome::Passed && pending_recovery.is_some() && recovery.is_some() {
+        primary = RunOutcome::Blocked;
+        primary_reason = Reason {
+            code: "recovery_cleanup_required".to_owned(),
+            message:
+                "a prior interrupted mutation is being recovered through declared visible cleanup"
+                    .to_owned(),
+        };
+    }
+
+    if primary == RunOutcome::Passed && pending_recovery.is_none() {
+        for step in &journey.steps {
+            if interrupted.load(Ordering::Acquire) {
+                primary = RunOutcome::Error;
+                primary_reason = Reason {
+                    code: "run_interrupted".to_owned(),
+                    message: "run was interrupted; fixture cleanup is being attempted".to_owned(),
+                };
+                break;
+            }
+            let (status, reason, navigated) = execute_v5_step(
+                journey,
+                run_root,
+                driver,
+                step,
+                StepPhase::Journey,
+                sequence,
+                has_navigated,
+                &fixture_token,
+                report,
+            );
+            sequence += 1;
+            has_navigated |= navigated;
+            if step.action.is_mutating()
+                && report.steps.last().is_some_and(|report_step| {
+                    !matches!(
+                        report_step.observation.action_state,
+                        None | Some(ActionState::NotAttempted)
+                    )
+                })
+                && let Some(fixture) = &mut report.fixture
+            {
+                fixture.mutation_attempted = true;
+            }
+            if status != RunOutcome::Passed {
+                primary = status;
+                primary_reason = reason;
+                break;
+            }
+        }
+    }
+    report.execution_outcome = primary;
+    report.execution_reason = primary_reason.clone();
+    report.outcome = primary;
+    report.reason = primary_reason;
+
+    if recovery.is_some() {
+        driver.begin_fixture_cleanup();
+        let mut cleanup_passed = true;
+        let mut cleanup_unknown = false;
+        for step in &journey.cleanup_steps {
+            let (status, reason, navigated) = execute_v5_step(
+                journey,
+                run_root,
+                driver,
+                step,
+                StepPhase::FixtureCleanup,
+                sequence,
+                has_navigated,
+                &fixture_token,
+                report,
+            );
+            sequence += 1;
+            has_navigated |= navigated;
+            if status != RunOutcome::Passed {
+                cleanup_passed = false;
+                cleanup_unknown = report.steps.last().is_some_and(|step| {
+                    step.observation.action_state == Some(ActionState::EffectUnknown)
+                });
+                override_with_message(report, "fixture_cleanup_failed", reason.message);
+                break;
+            }
+        }
+        if cleanup_passed {
+            match recovery
+                .take()
+                .expect("recovery handle exists")
+                .complete_verified()
+            {
+                Ok(()) => {
+                    if let Some(fixture) = &mut report.fixture {
+                        fixture.cleanup_status = FixtureCleanupStatus::Passed;
+                        fixture.recovery_required = false;
+                    }
+                    if pending_recovery.is_some() {
+                        report.execution_outcome = RunOutcome::Blocked;
+                        report.execution_reason = Reason {
+                            code: "recovery_completed".to_owned(),
+                            message: "the prior mutation's declared visible cleanup was verified; run the journey again to start a new mutation"
+                                .to_owned(),
+                        };
+                        report.outcome = report.execution_outcome;
+                        report.reason = report.execution_reason.clone();
+                    }
+                }
+                Err(error) => {
+                    if let Some(fixture) = &mut report.fixture {
+                        fixture.cleanup_status = FixtureCleanupStatus::Failed;
+                        fixture.recovery_required = true;
+                    }
+                    override_with_message(report, "recovery_complete_failed", error.to_string());
+                }
+            }
+        } else if let Some(fixture) = &mut report.fixture {
+            fixture.cleanup_status = if cleanup_unknown {
+                FixtureCleanupStatus::EffectUnknown
+            } else {
+                FixtureCleanupStatus::Failed
+            };
+            fixture.recovery_required = true;
+        }
+    }
+
+    finish_mutating_session(
+        journey,
+        run_root,
+        driver,
+        prepared,
+        trace_started,
+        report.execution_outcome,
+        report.execution_reason.clone(),
+        report,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_v5_step(
+    journey: &ValidatedJourney,
+    run_root: &Path,
+    driver: &mut dyn BrowserDriver,
+    step: &crate::journey::ValidatedStep,
+    phase: StepPhase,
+    index: usize,
+    has_navigated: bool,
+    fixture_token: &str,
+    report: &mut RunReport,
+) -> (RunOutcome, Reason, bool) {
+    let started = unix_ms();
+    let timer = Instant::now();
+    let mut observation = StepObservation::default();
+    let kind = action_kind(&step.action);
+    let result = execute_step(
+        journey,
+        run_root,
+        driver,
+        &step.id,
+        index,
+        &step.action,
+        has_navigated,
+        Some(fixture_token),
+        &mut observation,
+        &mut report.artifacts,
+    );
+    let navigated = matches!(step.action, ValidatedAction::Navigate { .. }) && result.is_ok();
+    let (status, reason) = match result {
+        Ok(StepResult::Passed) => (
+            RunOutcome::Passed,
+            Reason {
+                code: "step_passed".to_owned(),
+                message: "declared step passed".to_owned(),
+            },
+        ),
+        Ok(StepResult::Failed(message)) => (
+            RunOutcome::Failed,
+            Reason {
+                code: "checkpoint_failed".to_owned(),
+                message,
+            },
+        ),
+        Ok(StepResult::Blocked(message)) => (
+            RunOutcome::Blocked,
+            Reason {
+                code: "origin_not_authorized".to_owned(),
+                message,
+            },
+        ),
+        Err(error) => {
+            let mut outcome = RunOutcome::Passed;
+            let mut reason = Reason {
+                code: "step_error".to_owned(),
+                message: "step failed".to_owned(),
+            };
+            set_driver_error(&mut outcome, &mut reason, error);
+            (outcome, reason)
+        }
+    };
+    report.steps.push(StepReport {
+        sequence: index as u32 + 1,
+        id: step.id.clone(),
+        title: step.title.clone(),
+        phase: Some(phase),
+        effect: Some(step.effect),
+        kind,
+        status,
+        started_at_unix_ms: started,
+        duration_ms: elapsed_ms(timer),
+        observation,
+    });
+    (status, reason, navigated)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_mutating_session(
+    journey: &ValidatedJourney,
+    run_root: &Path,
+    driver: &mut dyn BrowserDriver,
+    prepared: bool,
+    trace_started: bool,
+    primary: RunOutcome,
+    primary_reason: Reason,
+    report: &mut RunReport,
+) {
+    if report.execution_reason.code == "run_incomplete" {
+        report.execution_outcome = primary;
+        report.execution_reason = primary_reason.clone();
+        report.outcome = primary;
+        report.reason = primary_reason;
+    }
+    if prepared && trace_started && journey.evidence.diagnostics {
+        match driver.diagnostics() {
+            Ok(diagnostics) => report.diagnostics = Some(diagnostics),
+            Err(error) => override_with_evidence_error(report, "diagnostics_failed", error),
+        }
+    }
+    if trace_started {
+        let path = run_root.join("evidence").join("trace.json");
+        match driver.stop_trace(&path) {
+            Ok(path) => {
+                match artifact_record(run_root, &path, "trace", "application/json", None, None) {
+                    Ok(artifact) => report.artifacts.push(artifact),
+                    Err(error) => {
+                        override_with_message(report, "trace_artifact_invalid", error.to_string())
+                    }
+                }
+            }
+            Err(error) => override_with_evidence_error(report, "trace_finalization_failed", error),
+        }
+    }
+    report.cleanup.attempted = true;
+    match driver.close() {
+        Ok(()) => report.cleanup.status = CleanupStatus::Passed,
+        Err(error) => {
+            report.cleanup.status = CleanupStatus::Failed;
+            report.cleanup.error = Some(safe_driver_message(&error));
+            override_with_evidence_error(report, "cleanup_failed", error);
+        }
+    }
+}
+
+fn mutation_interrupt_flag() -> Result<Arc<AtomicBool>, String> {
+    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    if let Some(flag) = FLAG.get() {
+        return Ok(Arc::clone(flag));
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    let handler_flag = Arc::clone(&flag);
+    ctrlc::set_handler(move || handler_flag.store(true, Ordering::Release))
+        .map_err(|error| error.to_string())?;
+    let _ = FLAG.set(Arc::clone(&flag));
+    Ok(flag)
+}
+
+fn fixture_token(run_id: &str) -> String {
+    let suffix = run_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .take(40)
+        .collect::<String>();
+    format!(
+        "crawlson-fixture-{}",
+        if suffix.is_empty() { "run" } else { &suffix }
+    )
 }
 
 fn execute(
@@ -738,6 +1534,7 @@ fn execute(
                 index,
                 &step.action,
                 has_navigated,
+                None,
                 &mut observation,
                 &mut report.artifacts,
             );
@@ -801,6 +1598,8 @@ fn execute(
                 sequence: index as u32 + 1,
                 id: step.id.clone(),
                 title: step.title.clone(),
+                phase: None,
+                effect: None,
                 kind,
                 status,
                 started_at_unix_ms: started,
@@ -864,6 +1663,7 @@ fn execute_step(
     index: usize,
     action: &ValidatedAction,
     has_navigated: bool,
+    fixture_token: Option<&str>,
     observation: &mut StepObservation,
     artifacts: &mut Vec<ArtifactRecord>,
 ) -> Result<StepResult, DriverError> {
@@ -1137,6 +1937,213 @@ fn execute_step(
                 StepResult::Failed("link action did not reach the declared destination".to_owned())
             }
         }
+        ValidatedAction::FillText {
+            selector,
+            value,
+            alt_text,
+        } => {
+            observation.action_state = Some(ActionState::NotAttempted);
+            observation.action_grant_sha256 = Some(mutation_step_binding(journey, step_id));
+            observation.guard_command_sequence = Some(driver.verify_exact_origin_guard()?);
+            let value = match (value, fixture_token) {
+                (MutationValue::FixtureToken, Some(value)) => value,
+                _ => {
+                    return Err(DriverError::Protocol {
+                        capability: "fill".to_owned(),
+                        message: "generated fixture token was unavailable".to_owned(),
+                    });
+                }
+            };
+            let dispatch_selector = exact_text_input_selector(selector);
+            if driver.count(&dispatch_selector)? != 1 {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared fixture input did not uniquely match an ordinary text field"
+                        .to_owned(),
+                ));
+            }
+            let visible = driver.visible(&dispatch_selector)?;
+            observation.visible = Some(visible);
+            if !visible {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared fixture input was not visible".to_owned(),
+                ));
+            }
+            let enabled = driver.enabled(&dispatch_selector)?;
+            observation.enabled = Some(enabled);
+            if !enabled {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared fixture input was not enabled".to_owned(),
+                ));
+            }
+            let before = driver.current_url()?;
+            observation.before_url = Some(safe_url(&journey.origin, &before));
+            let stem = format!("{:03}-{}", index + 1, step_id);
+            let raw = run_root.join("evidence").join(format!("{stem}.raw.png"));
+            let capture = driver.capture(&dispatch_selector, &raw)?;
+            let screenshot_sequence = capture.screenshot_command_sequence;
+            let prior_records = driver.records().len();
+            let fill_result = driver.fill(&dispatch_selector, value);
+            let records = driver.records();
+            let fill_sequence = records
+                .last()
+                .filter(|record| records.len() == prior_records + 1 && record.capability == "fill")
+                .map(|record| record.sequence)
+                .filter(|sequence| *sequence == screenshot_sequence.saturating_add(1));
+            let Some(fill_sequence) = fill_sequence else {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                let _ = finalize_focused_capture(
+                    run_root,
+                    step_id,
+                    index,
+                    alt_text,
+                    capture,
+                    None,
+                    observation,
+                    artifacts,
+                );
+                return Err(DriverError::ActionEffectUnknown(
+                    "fill dispatch did not produce adjacent command provenance".to_owned(),
+                ));
+            };
+            observation.action_command_sequence = Some(fill_sequence);
+            if let Err(error) = finalize_focused_capture(
+                run_root,
+                step_id,
+                index,
+                alt_text,
+                capture,
+                Some(fill_sequence),
+                observation,
+                artifacts,
+            ) {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                return Err(DriverError::ActionEffectUnknown(error.to_string()));
+            }
+            if let Err(error) = fill_result {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                return Err(DriverError::ActionEffectUnknown(error.to_string()));
+            }
+            observation.action_state = Some(ActionState::DriverAcknowledged);
+            let actual = driver.value(&dispatch_selector).map_err(|error| {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                DriverError::ActionEffectUnknown(error.to_string())
+            })?;
+            observation.observed_text_sha256 = Some(hex_digest(actual.as_bytes()));
+            let after = driver.current_url().map_err(|error| {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                DriverError::ActionEffectUnknown(error.to_string())
+            })?;
+            observation.observed_url = Some(safe_url(&journey.origin, &after));
+            let matched = actual == value && after == before;
+            observation.matched = Some(matched);
+            if matched {
+                observation.action_state = Some(ActionState::EffectVerified);
+                StepResult::Passed
+            } else {
+                observation.action_state = Some(ActionState::EffectUnverified);
+                StepResult::Failed(
+                    "fixture input value or page location did not match after fill".to_owned(),
+                )
+            }
+        }
+        ValidatedAction::ClickButton {
+            selector,
+            form_selector,
+            action_url,
+            expected_url,
+            verify_selector,
+            expected_text,
+            alt_text,
+        } => execute_button_mutation(
+            journey,
+            run_root,
+            driver,
+            step_id,
+            index,
+            selector,
+            form_selector,
+            action_url,
+            expected_url,
+            verify_selector,
+            expected_text,
+            alt_text,
+            observation,
+            artifacts,
+        )?,
+        ValidatedAction::CheckAbsent {
+            selector,
+            expected_text,
+        } => {
+            let visible = driver.visible(selector)?;
+            observation.visible = Some(visible);
+            if !visible {
+                observation.matched = Some(false);
+                StepResult::Failed("disposable fixture absence marker was not visible".to_owned())
+            } else {
+                let actual = driver.text(selector)?;
+                observation.observed_text_sha256 = Some(hex_digest(actual.as_bytes()));
+                let matched = actual == *expected_text;
+                observation.matched = Some(matched);
+                if matched {
+                    StepResult::Passed
+                } else {
+                    StepResult::Failed(
+                        "disposable fixture was not in the declared absent state".to_owned(),
+                    )
+                }
+            }
+        }
+        ValidatedAction::EnsureAbsent {
+            status_selector,
+            expected_text,
+            button_selector,
+            form_selector,
+            action_url,
+            expected_url,
+            alt_text,
+        } => {
+            observation.action_state = Some(ActionState::NotAttempted);
+            observation.action_grant_sha256 = Some(mutation_step_binding(journey, step_id));
+            let status_count = driver.count(status_selector)?;
+            if status_count > 1 {
+                observation.guard_command_sequence = Some(driver.verify_exact_origin_guard()?);
+                observation.matched = Some(false);
+                StepResult::Failed("fixture cleanup absence marker was ambiguous".to_owned())
+            } else if status_count == 1 && driver.visible(status_selector)? {
+                observation.guard_command_sequence = Some(driver.verify_exact_origin_guard()?);
+                let actual = driver.text(status_selector)?;
+                observation.observed_text_sha256 = Some(hex_digest(actual.as_bytes()));
+                if actual == *expected_text {
+                    observation.visible = Some(true);
+                    observation.matched = Some(true);
+                    observation.action_state = Some(ActionState::EffectVerified);
+                    StepResult::Passed
+                } else {
+                    observation.matched = Some(false);
+                    StepResult::Failed("fixture cleanup absence marker did not match".to_owned())
+                }
+            } else {
+                execute_button_mutation(
+                    journey,
+                    run_root,
+                    driver,
+                    step_id,
+                    index,
+                    button_selector,
+                    form_selector,
+                    action_url,
+                    expected_url,
+                    status_selector,
+                    expected_text,
+                    alt_text,
+                    observation,
+                    artifacts,
+                )?
+            }
+        }
         ValidatedAction::Capture { selector, alt_text } => {
             let visible = driver.visible(selector)?;
             observation.visible = Some(visible);
@@ -1181,6 +2188,186 @@ fn execute_step(
         }
     }
     Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_button_mutation(
+    journey: &ValidatedJourney,
+    run_root: &Path,
+    driver: &mut dyn BrowserDriver,
+    step_id: &str,
+    index: usize,
+    selector: &str,
+    form_selector: &str,
+    action_url: &url::Url,
+    expected_url: &url::Url,
+    verify_selector: &str,
+    expected_text: &str,
+    alt_text: &str,
+    observation: &mut StepObservation,
+    artifacts: &mut Vec<ArtifactRecord>,
+) -> Result<StepResult, DriverError> {
+    observation.action_state = Some(ActionState::NotAttempted);
+    observation.action_grant_sha256 = Some(mutation_step_binding(journey, step_id));
+    observation.guard_command_sequence = Some(driver.verify_exact_origin_guard()?);
+    observation.expected_url = Some(safe_url(&journey.origin, expected_url));
+    let before = driver.current_url()?;
+    observation.before_url = Some(safe_url(&journey.origin, &before));
+    if !journey.origin.contains(&before) {
+        return Ok(StepResult::Blocked(
+            "mutation preflight started outside the authorized origin".to_owned(),
+        ));
+    }
+    let form = exact_form_selector(form_selector);
+    let button = exact_submit_selector(form_selector, selector);
+    if driver.count(&form)? != 1 || driver.count(&button)? != 1 {
+        observation.matched = Some(false);
+        return Ok(StepResult::Failed(
+            "declared mutation form and submit button did not each match exactly once".to_owned(),
+        ));
+    }
+    let visible = driver.visible(&button)?;
+    observation.visible = Some(visible);
+    if !visible {
+        observation.matched = Some(false);
+        return Ok(StepResult::Failed(
+            "declared mutation submit button was not visible".to_owned(),
+        ));
+    }
+    let enabled = driver.enabled(&button)?;
+    observation.enabled = Some(enabled);
+    if !enabled {
+        observation.matched = Some(false);
+        return Ok(StepResult::Failed(
+            "declared mutation submit button was not enabled".to_owned(),
+        ));
+    }
+    let method = driver.attribute(&form, "method")?;
+    let action = driver.attribute(&form, "action")?;
+    let form_target = driver.attribute(&form, "target")?;
+    let button_method = driver.attribute(&button, "formmethod")?;
+    let button_action = driver.attribute(&button, "formaction")?;
+    let button_target = driver.attribute(&button, "formtarget")?;
+    let resolved_action = action.as_deref().and_then(|value| before.join(value).ok());
+    let target_safe = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("_self"))
+    };
+    if method.as_deref().map(str::to_ascii_lowercase).as_deref() != Some("post")
+        || resolved_action.as_ref() != Some(action_url)
+        || action_url.query().is_some()
+        || action_url.fragment().is_some()
+        || !journey.origin.contains(action_url)
+        || button_method
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        || button_action
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        || !target_safe(&form_target)
+        || !target_safe(&button_target)
+    {
+        observation.matched = Some(false);
+        return Ok(StepResult::Failed(
+            "mutation form did not satisfy the exact POST same-origin preflight".to_owned(),
+        ));
+    }
+
+    let stem = format!("{:03}-{}", index + 1, step_id);
+    let raw = run_root.join("evidence").join(format!("{stem}.raw.png"));
+    let capture = driver.capture(&button, &raw)?;
+    let screenshot_sequence = capture.screenshot_command_sequence;
+    let prior_records = driver.records().len();
+    let click = driver.click(&button);
+    let records = driver.records();
+    let click_sequence = records
+        .last()
+        .filter(|record| records.len() == prior_records + 1 && record.capability == "click")
+        .map(|record| record.sequence)
+        .filter(|sequence| *sequence == screenshot_sequence.saturating_add(1));
+    let Some(click_sequence) = click_sequence else {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        let _ = finalize_focused_capture(
+            run_root,
+            step_id,
+            index,
+            alt_text,
+            capture,
+            None,
+            observation,
+            artifacts,
+        );
+        return Err(DriverError::ActionEffectUnknown(
+            "mutation click did not produce adjacent command provenance".to_owned(),
+        ));
+    };
+    observation.action_command_sequence = Some(click_sequence);
+    if let Err(error) = finalize_focused_capture(
+        run_root,
+        step_id,
+        index,
+        alt_text,
+        capture,
+        Some(click_sequence),
+        observation,
+        artifacts,
+    ) {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        return Err(DriverError::ActionEffectUnknown(error.to_string()));
+    }
+    if let Err(error) = click {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        return Err(DriverError::ActionEffectUnknown(error.to_string()));
+    }
+    observation.action_state = Some(ActionState::DriverAcknowledged);
+    let after = driver.current_url().map_err(|error| {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        DriverError::ActionEffectUnknown(error.to_string())
+    })?;
+    observation.observed_url = Some(safe_url(&journey.origin, &after));
+    if !journey.origin.contains(&after) {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        return Err(DriverError::ActionEffectUnknown(
+            "mutation ended outside the exact authorized origin".to_owned(),
+        ));
+    }
+    if after != *expected_url {
+        observation.matched = Some(false);
+        observation.action_state = Some(ActionState::EffectUnverified);
+        return Ok(StepResult::Failed(
+            "mutation did not reach the declared postcondition URL".to_owned(),
+        ));
+    }
+    let post_visible = driver.visible(verify_selector).map_err(|error| {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        DriverError::ActionEffectUnknown(error.to_string())
+    })?;
+    if !post_visible {
+        observation.visible = Some(false);
+        observation.matched = Some(false);
+        observation.action_state = Some(ActionState::EffectUnverified);
+        return Ok(StepResult::Failed(
+            "mutation postcondition marker was not visible".to_owned(),
+        ));
+    }
+    let actual = driver.text(verify_selector).map_err(|error| {
+        observation.action_state = Some(ActionState::EffectUnknown);
+        DriverError::ActionEffectUnknown(error.to_string())
+    })?;
+    observation.visible = Some(true);
+    observation.observed_text_sha256 = Some(hex_digest(actual.as_bytes()));
+    let matched = actual == expected_text;
+    observation.matched = Some(matched);
+    if matched {
+        observation.action_state = Some(ActionState::EffectVerified);
+        Ok(StepResult::Passed)
+    } else {
+        observation.action_state = Some(ActionState::EffectUnverified);
+        Ok(StepResult::Failed(
+            "mutation visible postcondition did not match".to_owned(),
+        ))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1269,6 +2456,41 @@ fn action_step_binding(journey: &ValidatedJourney, step_id: &str) -> String {
         action_grant(journey, step_id)
     );
     hex_digest(binding.as_bytes())
+}
+
+fn mutation_step_binding(journey: &ValidatedJourney, step_id: &str) -> String {
+    let grant = action_grant(journey, step_id);
+    let binding = format!(
+        "crawlson-mutation-step-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nstep={}\ngrant={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        step_id,
+        grant
+    );
+    hex_digest(binding.as_bytes())
+}
+
+fn selector_id(selector: &str) -> &str {
+    selector
+        .strip_prefix('#')
+        .expect("validated mutation selector is a simple #id")
+}
+
+fn exact_text_input_selector(selector: &str) -> String {
+    let id = selector_id(selector);
+    format!("input#{id}:not([type=password]):not([type=file]):not([type=hidden]),textarea#{id}")
+}
+
+fn exact_form_selector(selector: &str) -> String {
+    format!("form#{}", selector_id(selector))
+}
+
+fn exact_submit_selector(form_selector: &str, selector: &str) -> String {
+    let form = selector_id(form_selector);
+    let button = selector_id(selector);
+    format!("form#{form} button#{button}[type=submit],form#{form} input#{button}[type=submit]")
 }
 
 fn anchor_selector(selector: &str) -> String {
@@ -1392,6 +2614,7 @@ fn base_report(root: &Path, run_id: &str, source_path: String, started_at: u64) 
         },
         target_origin: None,
         action_authorization: None,
+        mutation_authorization: None,
         authentication: None,
         started_at_unix_ms: started_at,
         finished_at_unix_ms: started_at,
@@ -1415,6 +2638,7 @@ fn base_report(root: &Path, run_id: &str, source_path: String, started_at: u64) 
         steps: Vec::new(),
         artifacts: Vec::new(),
         diagnostics: None,
+        fixture: None,
         cleanup: CleanupReport {
             attempted: false,
             status: CleanupStatus::NotNeeded,
@@ -1581,6 +2805,10 @@ fn action_kind(action: &ValidatedAction) -> &'static str {
         ValidatedAction::CheckText { .. } => "check_text",
         ValidatedAction::FollowLink { .. } => "follow_link",
         ValidatedAction::Capture { .. } => "capture",
+        ValidatedAction::FillText { .. } => "fill_text",
+        ValidatedAction::ClickButton { .. } => "click_button",
+        ValidatedAction::CheckAbsent { .. } => "check_absent",
+        ValidatedAction::EnsureAbsent { .. } => "ensure_absent",
     }
 }
 
@@ -1695,16 +2923,19 @@ mod tests {
             },
             origin: Origin::parse("http://127.0.0.1:4173").unwrap(),
             authentication: None,
+            fixture: None,
             evidence: EvidencePolicy {
                 trace: true,
                 diagnostics: true,
             },
+            setup_steps: Vec::new(),
             steps: vec![
                 ValidatedStep {
                     id: "open".to_owned(),
                     title: "Open".to_owned(),
                     guide_instruction: None,
                     evidence_for: Vec::new(),
+                    effect: StepEffect::ReadOnly,
                     action: ValidatedAction::Navigate {
                         url: Url::parse("http://127.0.0.1:4173/").unwrap(),
                     },
@@ -1714,6 +2945,7 @@ mod tests {
                     title: "Check".to_owned(),
                     guide_instruction: None,
                     evidence_for: Vec::new(),
+                    effect: StepEffect::ReadOnly,
                     action: ValidatedAction::CheckText {
                         selector: "h1".to_owned(),
                         expected: expected.to_owned(),
@@ -1721,6 +2953,7 @@ mod tests {
                     },
                 },
             ],
+            cleanup_steps: Vec::new(),
         }
     }
 
@@ -1938,6 +3171,7 @@ mod tests {
             0,
             &action,
             true,
+            None,
             &mut observation,
             &mut artifacts,
         ) {
