@@ -71,3 +71,18 @@ and use `Closes #<issue>` while GitHub is canonical. Merging moves the card to
 Done. Done means delivered to
 `main`, not production-ready. Production promotion remains a
 separate review after staging verification.
+
+`main` requires an up-to-date `CI` check, linear history, and resolved review
+conversations. Squash is the only merge method. After a pull request is scoped,
+reviewed, and eligible, arm it with:
+
+```sh
+gh pr merge <number> --auto --squash
+```
+
+Do not auto-arm every public contribution. Automatic arming, if later added,
+must require an explicit maintainer-controlled label and must not execute or
+check out untrusted pull-request code in a privileged workflow.
+
+The solo-maintainer ruleset requires zero approvals to avoid deadlock. Raise the
+requirement to one approval when a second active maintainer is available.
