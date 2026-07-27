@@ -72,9 +72,31 @@ publication remain owner-gated follow-up work.
   exact vivid-red outline, unchanged action interior, deterministic dim-mask
   pixels, guide image identity, passing guide, intentional finding, and
   pre-browser authorization block.
-- Hosted four-target release proof and live ruleset readback are required before
-  delivery and will be recorded on the pull request.
+- PR #17 is merge-gated by hosted `CI` and `Release dry run` aggregates. The
+  delivered head must pass ordinary Linux, macOS, and Windows CI; the packaged
+  real-browser journey and exact focus-pixel verifier; native package, extract,
+  managed-install, alias, receipt, demo-startup, and owned-shutdown checks on
+  all four targets; exact-matrix reassembly; ephemeral test signing; and
+  signature verification. Failed intermediate Windows runs exposed and then
+  regression-tested verbatim/extended path traversal, staged-file flushing,
+  and ZIP extraction behavior rather than being rerun without diagnosis.
+- GitHub API readback confirmed repository auto-merge and branch deletion are
+  enabled, squash is the only merge method, workflow tokens default to read
+  only and cannot approve pull requests, and live ruleset `19799701` requires
+  the exact `CI` and `Release dry run` contexts with no bypass actors.
 
 ## Delivered result
 
-<!-- Summarize what changed and any follow-up work that remains. -->
+- Shipped the versioned 0.5.0 release contract, deterministic four-target
+  bundles, raw updater assets, signed inventory/update schemas, private release
+  assembly tool, and non-publishing test-key workflow.
+- Added `crawlson install` and equivalent `clson install` behavior with exact
+  bundle validation, managed updater ownership, package-manager guardrails,
+  concurrent update locking, observed-error rollback, and explicit crash-gap
+  documentation.
+- Proved the documented guide/finding/blocked loop from packaged Rust binaries
+  through real `agent-browser`, including exact vivid-red action outlines and
+  deterministic dimmed context.
+- Public license selection, namespace reservation, durable crash recovery,
+  production key generation/custody, public-key embedding, and public release
+  authorization remain explicit owner-gated follow-up work.

@@ -56,7 +56,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
 - [x] Define the 0.5.0 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
-- [ ] Prove a clean managed install and packaged demo from every 0.5.0 dry-run
+- [x] Prove a clean managed install and packaged demo from every 0.5.0 dry-run
       bundle without using a production key or publishing a release.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
