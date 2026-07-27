@@ -1,7 +1,7 @@
 # Release and managed-install contract v1
 
-Status: defined for Crawlson 0.5.0. The repository can exercise this contract
-with non-publishing dry-run artifacts, but no public 0.5.0 release exists yet.
+Status: defined for Crawlson 0.5.1. The repository can exercise this contract
+with non-publishing dry-run artifacts, but no public 0.5.1 release exists yet.
 
 ## Purpose and boundaries
 
@@ -180,10 +180,12 @@ modify `clson`: the stable launcher continues forwarding to the sibling
 canonical executable.
 
 Direct Windows self-replacement remains disabled because rollback of the
-running executable is not yet proven. `crawlson upgrade` on Windows does not
-partially replace anything; the user extracts the new bundle and reruns its
-`crawlson install --from-bundle ... --prefix ...` command against the existing
-managed prefix.
+running executable is not yet proven. Windows resolves automatic policy to
+notify-only, persists a signed release notice on the success cadence, and never
+downloads the raw updater payload. Manual `crawlson upgrade` also blocks before
+payload download; the user authenticates and extracts the new bundle, then
+reruns its `crawlson install --from-bundle ... --prefix ...` command against the
+existing managed prefix.
 
 ## Packaged demo proof
 

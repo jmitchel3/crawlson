@@ -77,13 +77,13 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.5.0 CLI provides the first independently useful read-only vertical
+The Rust 0.5.1 CLI provides the first independently useful read-only vertical
 slice. It can run an explicitly authorized journey through `agent-browser`,
 retain raw evidence, render focused action images, and turn a completed run
 into either a verified guide or evidence-backed deterministic findings. The
 repository includes a credential-free demo of that complete loop and a
 non-publishing release path for validating bundles and managed installation.
-No public 0.5.0 release exists yet: license selection, namespace reservation,
+No public 0.5.1 release exists yet: license selection, namespace reservation,
 and production signing-key custody remain owner decisions. Autonomous agent
 exploration, authentication execution, mutations, and model-judged observations
 remain later vertical slices.
@@ -108,7 +108,7 @@ so `clson doctor` and `clson upgrade` have the same behavior.
 
 ### Release bundles and managed installation
 
-Crawlson 0.5.0 defines deterministic bundles for four targets: Apple Silicon
+Crawlson 0.5.1 defines deterministic bundles for four targets: Apple Silicon
 macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
 the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
 script and journey fixtures. The demo stays in the extracted bundle; managed
@@ -135,9 +135,10 @@ The signed release inventory authenticates complete downloadable bundles. A
 separate signed updater manifest deliberately lists only one raw `crawlson`
 payload per target; each raw payload must be byte-for-byte identical to that
 bundle's `bin/crawlson` member. Unix managed installs can replace that verified
-payload atomically. Direct Windows self-replacement remains fail-closed, so a
-Windows user upgrades by extracting the new bundle and rerunning the bundled
-`crawlson install` command.
+payload atomically. Direct Windows self-replacement remains fail-closed.
+Windows managed installations check and notify without downloading the raw
+payload; a user upgrades by authenticating and extracting the new bundle, then
+rerunning its bundled `crawlson install` command.
 
 Release dry runs use test-only signing keys, retain their output only as CI
 artifacts, and have no permission or command capable of publishing a release.
@@ -312,7 +313,7 @@ receipt. Cargo, Homebrew, Nix, unknown, downgrade, and prerelease cases fail
 closed with an appropriate package-manager or reinstall instruction. Crawlson
 never elevates privileges or upgrades `agent-browser`.
 
-First-party managed installations default to automatic compatible upgrades.
+First-party managed Unix installations default to automatic compatible upgrades.
 Successful checks run in a separate process no more than weekly, with persisted
 per-install jitter; transient failures retry after at least a day. Foreground
 commands never wait for updater network or worker completion, and worker failure
@@ -324,8 +325,10 @@ Release metadata must be immutable and bind each asset to GitHub's SHA-256
 digest. Crawlson additionally requires a Minisign signature over the exact
 raw-payload update manifest and verifies the downloaded binary before
 same-directory atomic replacement on supported Unix installations. Direct
-Windows self-replacement fails closed; Windows users rerun the validated bundle
-installer so replacement and rollback happen outside the installed executable.
+Windows self-replacement fails closed. Windows resolves even an explicit `auto`
+policy to notify-only, avoids the raw payload download, and directs users to the
+authenticated bundle installer so replacement and rollback happen outside the
+installed executable.
 Development and dry-run builds fail closed against the stable channel until a
 production release public key is embedded and owner-approved signed assets are
 published.
