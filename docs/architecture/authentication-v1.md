@@ -91,7 +91,9 @@ The source must be a regular non-symlink file. Unix sources must have no group
 or other permission bits. Windows sources must not be reparse points; operators
 remain responsible for supplying them from a user-private ACL-protected
 location. Crawlson reads through the validated file handle, bounds the read,
-and rejects a size or modification change during the read.
+and rejects a size or modification change during the read. On Windows, the
+no-follow opened handle is authoritative: Crawlson validates its regular-file
+and non-reparse attributes and never reopens the source path.
 
 The validated bytes are copied to a newly created operating-system temporary
 directory outside the run tree, using the neutral leaf name `state.json` and

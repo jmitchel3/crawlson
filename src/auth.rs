@@ -74,7 +74,6 @@ impl ValidatedState {
         let mut file = open_options.open(path).map_err(|_| StateError::Invalid)?;
         let opened_metadata = file.metadata().map_err(|_| StateError::Invalid)?;
         if !opened_metadata.is_file()
-            || opened_metadata.len() != path_metadata.len()
             || opened_metadata.len() == 0
             || opened_metadata.len() > MAX_STATE_BYTES
         {
@@ -85,6 +84,7 @@ impl ValidatedState {
             use std::os::unix::fs::MetadataExt;
             if opened_metadata.dev() != path_metadata.dev()
                 || opened_metadata.ino() != path_metadata.ino()
+                || opened_metadata.len() != path_metadata.len()
                 || opened_metadata.mode() & 0o077 != 0
             {
                 return Err(StateError::Invalid);
@@ -94,12 +94,11 @@ impl ValidatedState {
         {
             use std::os::windows::fs::MetadataExt;
             const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-            if opened_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || opened_metadata.volume_serial_number().is_none()
-                || opened_metadata.volume_serial_number() != path_metadata.volume_serial_number()
-                || opened_metadata.file_index().is_none()
-                || opened_metadata.file_index() != path_metadata.file_index()
-            {
+            // Windows has no stable std API for comparing file IDs. Treat the
+            // no-follow opened handle as authoritative: validate its type,
+            // reparse attribute, size, contents, and post-read stability, and
+            // never reopen the source path.
+            if opened_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(StateError::Invalid);
             }
         }
