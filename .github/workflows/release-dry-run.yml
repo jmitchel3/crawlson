@@ -1,0 +1,462 @@
+name: Release dry run
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: "true"
+  CRAWLSON_NO_UPDATE_CHECK: "1"
+  CRAWLSON_OFFLINE: "1"
+  NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  NO_UPDATE_NOTIFIER: "1"
+
+jobs:
+  package:
+    name: package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe_suffix: ""
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            exe_suffix: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            exe_suffix: ""
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            exe_suffix: ".exe"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare package output and logs
+        shell: bash
+        run: mkdir -p "release-output/$RELEASE_TARGET/logs"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Select pinned Rust toolchain
+        run: rustup default 1.92.0
+      - name: Test locked release workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo test --locked --workspace --all-targets --all-features \
+            2>&1 | tee "release-output/$RELEASE_TARGET/logs/cargo-test.log"
+      - name: Build locked native release binaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo build --locked --workspace --release --bins \
+            2>&1 | tee "release-output/$RELEASE_TARGET/logs/cargo-build.log"
+      - name: Package native release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "target/release/crawlson-release$EXE_SUFFIX" package \
+            --target "$RELEASE_TARGET" \
+            --bin-dir target/release \
+            --source-dir . \
+            --out-dir "release-output/$RELEASE_TARGET" \
+            2>&1 | tee "release-output/$RELEASE_TARGET/logs/package.log"
+      - name: Extract the generated package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          package_dir="release-output/$RELEASE_TARGET"
+          extract_dir=".release-extract/$RELEASE_TARGET"
+          mkdir -p "$extract_dir"
+
+          bundle=""
+          for candidate in "$package_dir"/*.tar.gz; do
+            [[ -f "$candidate" ]] || continue
+            [[ -z "$bundle" ]] || {
+              echo "multiple release bundles were generated" >&2
+              exit 1
+            }
+            bundle="$candidate"
+          done
+          [[ -n "$bundle" ]] || {
+            echo "no release bundle was generated" >&2
+            exit 1
+          }
+          tar -xf "$bundle" -C "$extract_dir"
+
+          bundle_root=""
+          for candidate in "$extract_dir"/*; do
+            [[ -d "$candidate" ]] || continue
+            [[ -z "$bundle_root" ]] || {
+              echo "release archive has multiple root directories" >&2
+              exit 1
+            }
+            bundle_root="$candidate"
+          done
+          [[ -n "$bundle_root" ]] || {
+            echo "release archive has no root directory" >&2
+            exit 1
+          }
+          printf 'BUNDLE_ROOT=%s\n' "$bundle_root" >> "$GITHUB_ENV"
+      - name: Extract the generated Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageDir = "release-output/$env:RELEASE_TARGET"
+          $extractDir = ".release-extract/$env:RELEASE_TARGET"
+          $bundles = @(Get-ChildItem -LiteralPath $packageDir -Filter "*.zip" -File)
+          if ($bundles.Count -ne 1) {
+            throw "expected exactly one Windows release bundle"
+          }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          Expand-Archive -LiteralPath $bundles[0].FullName `
+            -DestinationPath $extractDir
+          $roots = @(Get-ChildItem -LiteralPath $extractDir -Directory)
+          if ($roots.Count -ne 1) {
+            throw "Windows release archive must contain exactly one root directory"
+          }
+          $bundleRoot = "$extractDir/$($roots[0].Name)"
+          "BUNDLE_ROOT=$bundleRoot" | Out-File -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 -Append
+      - name: Require packaged command parity and managed installation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          logs="release-output/$RELEASE_TARGET/logs"
+          bundled_crawlson="$BUNDLE_ROOT/bin/crawlson$EXE_SUFFIX"
+          bundled_clson="$BUNDLE_ROOT/bin/clson$EXE_SUFFIX"
+          runner_temp="$(cd "$RUNNER_TEMP" && pwd -P)"
+          install_root="$runner_temp/crawlson-release-install-$RELEASE_TARGET"
+          prefix="$install_root/bin"
+          state="$install_root/state"
+
+          "$bundled_crawlson" --json version > "$logs/bundled-crawlson-version.json"
+          "$bundled_clson" --json version > "$logs/bundled-clson-version.json"
+          cmp -s "$logs/bundled-crawlson-version.json" \
+            "$logs/bundled-clson-version.json"
+
+          CRAWLSON_HOME="$state" "$bundled_crawlson" --json install \
+            --from-bundle "$BUNDLE_ROOT" --prefix "$prefix" \
+            > "$logs/install.json"
+          grep -F '"status":"installed"' "$logs/install.json" >/dev/null
+          grep -F "\"target\":\"$RELEASE_TARGET\"" "$logs/install.json" >/dev/null
+
+          receipt="$state/install.json"
+          test -s "$receipt"
+          grep -F '"schema_version":1' "$receipt" >/dev/null
+          grep -F '"kind":"standalone"' "$receipt" >/dev/null
+          grep -F "\"target\":\"$RELEASE_TARGET\"" "$receipt" >/dev/null
+          grep -E '"binary":"[^"]+"' "$receipt" >/dev/null
+          grep -E '"install_id":"[^"]+"' "$receipt" >/dev/null
+
+          installed_crawlson="$prefix/crawlson$EXE_SUFFIX"
+          installed_clson="$prefix/clson$EXE_SUFFIX"
+          test -x "$installed_crawlson"
+          test -x "$installed_clson"
+          test ! -e "$prefix/crawlson-demo$EXE_SUFFIX"
+          CRAWLSON_HOME="$state" "$installed_crawlson" --json version \
+            > "$logs/installed-crawlson-version.json"
+          CRAWLSON_HOME="$state" "$installed_clson" --json version \
+            > "$logs/installed-clson-version.json"
+          cmp -s "$logs/installed-crawlson-version.json" \
+            "$logs/installed-clson-version.json"
+          cmp -s "$logs/bundled-crawlson-version.json" \
+            "$logs/installed-crawlson-version.json"
+      - name: Require packaged demo HTTP and owned termination
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          logs="release-output/$RELEASE_TARGET/logs"
+          demo="$BUNDLE_ROOT/bin/crawlson-demo$EXE_SUFFIX"
+          demo_pid=""
+
+          cleanup_demo() {
+            if [[ -n "$demo_pid" ]] && kill -0 "$demo_pid" 2>/dev/null; then
+              kill -KILL "$demo_pid" 2>/dev/null || true
+              wait "$demo_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_demo EXIT
+
+          "$demo" --port 0 --json \
+            > "$logs/demo-ready.json" 2> "$logs/demo-server.log" &
+          demo_pid=$!
+          for _ in {1..200}; do
+            if ! kill -0 "$demo_pid" 2>/dev/null; then
+              echo "packaged demo exited before readiness" >&2
+              exit 1
+            fi
+            [[ -s "$logs/demo-ready.json" ]] && break
+            sleep 0.05
+          done
+          test -s "$logs/demo-ready.json"
+          grep -F '"schema_version":1' "$logs/demo-ready.json" >/dev/null
+          grep -F '"status":"ready"' "$logs/demo-ready.json" >/dev/null
+          ready_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$logs/demo-ready.json")"
+          test "$ready_pid" = "$demo_pid"
+          origin="$(sed -n 's/.*"origin":"\([^"]*\)".*/\1/p' "$logs/demo-ready.json")"
+          [[ "$origin" == http://127.0.0.1:* ]]
+
+          curl --fail --silent --show-error --max-time 5 "$origin/healthz" \
+            > "$logs/demo-health.txt"
+          grep -Fx 'ready' "$logs/demo-health.txt" >/dev/null
+          curl --fail --silent --show-error --max-time 5 "$origin/" \
+            > "$logs/demo-page.html"
+          grep -F 'Welcome to the Crawlson demo' "$logs/demo-page.html" >/dev/null
+
+          kill -TERM "$demo_pid"
+          for _ in {1..100}; do
+            kill -0 "$demo_pid" 2>/dev/null || break
+            sleep 0.05
+          done
+          if kill -0 "$demo_pid" 2>/dev/null; then
+            echo "packaged demo did not terminate within five seconds" >&2
+            exit 1
+          fi
+          set +e
+          wait "$demo_pid"
+          demo_status=$?
+          set -e
+          printf 'demo exit status: %s\n' "$demo_status" > "$logs/demo-shutdown.log"
+          test "$demo_status" -eq 0
+          demo_pid=""
+          trap - EXIT
+      - name: Require packaged demo HTTP and owned Windows termination
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logs = "release-output/$env:RELEASE_TARGET/logs"
+          $demo = Join-Path $env:BUNDLE_ROOT "bin/crawlson-demo.exe"
+          $readyPath = Join-Path $logs "demo-ready.json"
+          $serverLog = Join-Path $logs "demo-server.log"
+          $shutdownLog = Join-Path $logs "demo-shutdown.log"
+          $demoProcess = Start-Process -FilePath $demo `
+            -ArgumentList @("--port", "0", "--json") `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput $readyPath `
+            -RedirectStandardError $serverLog
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 200; $attempt++) {
+              $demoProcess.Refresh()
+              if ($demoProcess.HasExited) {
+                throw "packaged demo exited before readiness"
+              }
+              if ((Test-Path $readyPath) -and (Get-Item $readyPath).Length -gt 0) {
+                $ready = $true
+                break
+              }
+              Start-Sleep -Milliseconds 50
+            }
+            if (-not $ready) {
+              throw "packaged demo did not become ready"
+            }
+            $report = Get-Content -Raw $readyPath | ConvertFrom-Json
+            if ($report.schema_version -ne 1 -or $report.status -ne "ready") {
+              throw "packaged demo emitted an invalid readiness report"
+            }
+            if ($report.pid -ne $demoProcess.Id) {
+              throw "packaged demo readiness identified a different process"
+            }
+            $origin = [Uri]$report.origin
+            if ($origin.Scheme -ne "http" -or $origin.Host -ne "127.0.0.1") {
+              throw "packaged demo readiness was not an HTTP loopback origin"
+            }
+            $health = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 `
+              -Uri "$($origin.AbsoluteUri)healthz"
+            if ($health.StatusCode -ne 200 -or $health.Content.Trim() -ne "ready") {
+              throw "packaged demo health response was invalid"
+            }
+            $page = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 `
+              -Uri $origin.AbsoluteUri
+            if ($page.StatusCode -ne 200 -or `
+              $page.Content -notmatch "Welcome to the Crawlson demo") {
+              throw "packaged demo page response was invalid"
+            }
+          }
+          finally {
+            $demoProcess.Refresh()
+            if (-not $demoProcess.HasExited) {
+              Stop-Process -Id $demoProcess.Id -Force
+            }
+            $demoProcess.WaitForExit()
+          }
+          if (-not $demoProcess.HasExited) {
+            throw "packaged demo process remained after owned termination"
+          }
+          "demo process $($demoProcess.Id) was stopped and reaped" |
+            Set-Content -NoNewline $shutdownLog
+      - name: Upload target package and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crawlson-release-dry-run-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-output/${{ matrix.target }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+
+  assemble:
+    name: assemble and test-sign release set
+    needs:
+      - package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Select pinned Rust toolchain
+        run: rustup default 1.92.0
+      - name: Build locked release verifier
+        run: cargo build --locked --release -p crawlson-release
+      - name: Download isolated target artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: crawlson-release-dry-run-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-inputs
+          merge-multiple: false
+      - name: Rehash and assemble exact release matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_tool="target/release/crawlson-release"
+          input_arguments=()
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            artifact_dir="release-inputs/crawlson-release-dry-run-$target-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            test -d "$artifact_dir"
+            fragment=""
+            for candidate in "$artifact_dir"/*.fragment.json; do
+              [[ -f "$candidate" ]] || continue
+              [[ -z "$fragment" ]] || {
+                echo "multiple fragments for $target" >&2
+                exit 1
+              }
+              fragment="$candidate"
+            done
+            [[ -n "$fragment" ]] || {
+              echo "missing release fragment for $target" >&2
+              exit 1
+            }
+            input_arguments+=(--input "$fragment")
+          done
+          "$release_tool" assemble "${input_arguments[@]}" \
+            --out-dir .release-assembled
+      - name: Generate ephemeral test key and sign both manifests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_tool="target/release/crawlson-release"
+          key_dir="$RUNNER_TEMP/crawlson-dry-run-key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$release_tool" generate-test-key --out-dir "$key_dir"
+          secret="$key_dir/crawlson-dry-run-test-only.key"
+          cleanup_test_key() {
+            rm -f "$secret"
+          }
+          trap cleanup_test_key EXIT INT TERM
+          "$release_tool" sign \
+            --secret-key "$secret" \
+            --public-key "$key_dir/crawlson-dry-run-test-only.pub" \
+            --input .release-assembled/crawlson-update.json \
+            --input .release-assembled/crawlson-release.json
+
+          combined="EPHEMERAL-TEST-ONLY"
+          mkdir -p "$combined"
+          cp "$key_dir/crawlson-dry-run-test-only.pub" "$combined/"
+          cp .release-assembled/crawlson-update.json "$combined/"
+          cp .release-assembled/crawlson-update.json.minisig "$combined/"
+          cp .release-assembled/crawlson-release.json "$combined/"
+          cp .release-assembled/crawlson-release.json.minisig "$combined/"
+          printf '%s\n' \
+            'EPHEMERAL TEST KEY ONLY - NOT A PRODUCTION RELEASE - DO NOT PROMOTE' \
+            > "$combined/EPHEMERAL-TEST-ONLY.txt"
+
+          package_count=0
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            artifact_dir="release-inputs/crawlson-release-dry-run-$target-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            bundle=""
+            for candidate in "$artifact_dir"/*.tar.gz "$artifact_dir"/*.zip; do
+              [[ -f "$candidate" ]] || continue
+              [[ -z "$bundle" ]] || {
+                echo "multiple bundles for $target" >&2
+                exit 1
+              }
+              bundle="$candidate"
+            done
+            [[ -n "$bundle" ]]
+            update=""
+            for candidate in "$artifact_dir"/crawlson-update-v*; do
+              [[ -f "$candidate" ]] || continue
+              [[ -z "$update" ]] || {
+                echo "multiple raw update payloads for $target" >&2
+                exit 1
+              }
+              update="$candidate"
+            done
+            [[ -n "$update" ]]
+            cp "$bundle" "$combined/"
+            cp "$update" "$combined/"
+            package_count=$((package_count + 2))
+          done
+          test "$package_count" -eq 8
+
+          rm -f "$secret"
+          test ! -e "$secret"
+          trap - EXIT INT TERM
+          if find "$combined" -type f \( -name '*.key' -o -name '*.fragment.json' \) \
+            -print -quit | grep -q .; then
+            echo "combined artifact contains private or intermediate material" >&2
+            exit 1
+          fi
+          test "$(find "$combined" -type f | wc -l)" -eq 14
+      - name: Upload explicitly test-only release set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crawlson-EPHEMERAL-TEST-ONLY-${{ github.run_id }}-${{ github.run_attempt }}
+          path: EPHEMERAL-TEST-ONLY
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+
+  release-dry-run:
+    name: Release dry run
+    if: always()
+    needs:
+      - package
+      - assemble
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require every release proof
+        env:
+          ASSEMBLE_RESULT: ${{ needs.assemble.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          test "$PACKAGE_RESULT" = success
+          test "$ASSEMBLE_RESULT" = success

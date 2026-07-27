@@ -26,9 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+          - ubuntu-22.04
+          - macos-14
+          - windows-2022
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -40,15 +40,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo test --locked --workspace --all-targets --all-features
       - name: Build both command names
-        run: cargo build --workspace --bins
+        run: cargo build --locked --workspace --bins
       - name: Smoke-test canonical command
-        run: cargo run --quiet --bin crawlson -- version
+        run: cargo run --locked --quiet --bin crawlson -- version
       - name: Smoke-test alias command
-        run: cargo run --quiet --bin clson -- version
+        run: cargo run --locked --quiet --bin clson -- version
+      - name: Test demo script arguments
+        shell: bash
+        run: bash tests/test_demo_script.sh
 
   real-browser:
     name: real agent-browser demo
@@ -97,11 +100,48 @@ jobs:
           set -Eeuo pipefail
           env -u CI "$AGENT_BROWSER_REAL_BIN" doctor --offline --json \
             2>&1 | tee ci-artifacts/agent-browser-doctor.json
-      - name: Run the documented complete demo
+      - name: Package and run the documented complete demo
         shell: bash
         run: |
           set -Eeuo pipefail
-          scripts/demo.sh --agent-browser "$AGENT_BROWSER_REAL_BIN" \
+          cargo build --locked --workspace --release --bins \
+            2>&1 | tee ci-artifacts/release-build.log
+          CRAWLSON_PACKAGE_DIR="$RUNNER_TEMP/crawlson-release-package"
+          CRAWLSON_EXTRACT_DIR="$RUNNER_TEMP/crawlson-release-extract"
+          target/release/crawlson-release package \
+            --target x86_64-unknown-linux-gnu \
+            --bin-dir target/release \
+            --source-dir . \
+            --out-dir "$CRAWLSON_PACKAGE_DIR" \
+            2>&1 | tee ci-artifacts/release-package.log
+          CRAWLSON_PACKAGE=""
+          for candidate in "$CRAWLSON_PACKAGE_DIR"/*.tar.gz; do
+            [[ -f "$candidate" ]] || continue
+            [[ -z "$CRAWLSON_PACKAGE" ]] || {
+              echo "multiple Linux release bundles were generated" >&2
+              exit 1
+            }
+            CRAWLSON_PACKAGE="$candidate"
+          done
+          [[ -n "$CRAWLSON_PACKAGE" ]]
+          mkdir -p "$CRAWLSON_EXTRACT_DIR"
+          tar -xzf "$CRAWLSON_PACKAGE" -C "$CRAWLSON_EXTRACT_DIR"
+          CRAWLSON_BUNDLE_ROOT=""
+          for candidate in "$CRAWLSON_EXTRACT_DIR"/*; do
+            [[ -d "$candidate" ]] || continue
+            [[ -z "$CRAWLSON_BUNDLE_ROOT" ]] || {
+              echo "Linux release archive has multiple roots" >&2
+              exit 1
+            }
+            CRAWLSON_BUNDLE_ROOT="$candidate"
+          done
+          [[ -n "$CRAWLSON_BUNDLE_ROOT" ]]
+          echo "CRAWLSON_REAL_CLI_BIN=$CRAWLSON_BUNDLE_ROOT/bin/crawlson" >> "$GITHUB_ENV"
+          echo "CRAWLSON_REAL_DEMO_BIN=$CRAWLSON_BUNDLE_ROOT/bin/crawlson-demo" >> "$GITHUB_ENV"
+          "$CRAWLSON_BUNDLE_ROOT/scripts/demo.sh" \
+            --crawlson-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson" \
+            --demo-bin "$CRAWLSON_BUNDLE_ROOT/bin/crawlson-demo" \
+            --agent-browser "$AGENT_BROWSER_REAL_BIN" \
             --output-dir "$GITHUB_WORKSPACE/ci-artifacts/demo" \
             2>&1 | tee ci-artifacts/demo-command.log
       - name: Require the real-browser integration
@@ -114,7 +154,7 @@ jobs:
             2>&1 | tee ci-artifacts/real-browser-test.log
       - name: Upload real-browser evidence and logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: crawlson-real-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts
@@ -127,7 +167,7 @@ jobs:
     needs:
       - test
       - real-browser
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Require every platform job
         env:

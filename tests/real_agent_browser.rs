@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use wait_timeout::ChildExt;
 
 const REAL_BROWSER_MODE: &str = "CRAWLSON_REAL_BROWSER";
+const REAL_CLI_BIN: &str = "CRAWLSON_REAL_CLI_BIN";
+const REAL_DEMO_BIN: &str = "CRAWLSON_REAL_DEMO_BIN";
 const REQUIRED_MODE: &str = "required";
 const SKIP_MODE: &str = "skip";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(180);
@@ -169,7 +171,7 @@ fn agent_browser_executable() -> PathBuf {
 }
 
 fn require_supported_agent_browser(executable: &OsStr) {
-    let mut command = Command::new(cargo_bin("crawlson"));
+    let mut command = Command::new(crawlson_executable());
     command
         .args(["--json", "doctor", "--agent-browser"])
         .arg(executable);
@@ -194,7 +196,7 @@ struct DemoProcess {
 
 impl DemoProcess {
     fn start() -> Self {
-        let mut child = Command::new(cargo_bin("crawlson-demo"))
+        let mut child = Command::new(demo_executable())
             .args(["--port", "0", "--json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -378,7 +380,7 @@ fn run_journey(
     agent_browser: &OsStr,
     allowed_origin: Option<&str>,
 ) -> Output {
-    let mut command = Command::new(cargo_bin("crawlson"));
+    let mut command = Command::new(crawlson_executable());
     command
         .args(["--json", "run"])
         .arg(journey)
@@ -393,13 +395,37 @@ fn run_journey(
 }
 
 fn render_journey(run_directory: &Path, journey: &Path) -> Output {
-    let mut command = Command::new(cargo_bin("crawlson"));
+    let mut command = Command::new(crawlson_executable());
     command
         .args(["--json", "render"])
         .arg(run_directory)
         .arg("--journey")
         .arg(journey);
     command_output(command, "crawlson render")
+}
+
+fn crawlson_executable() -> PathBuf {
+    selected_executable(REAL_CLI_BIN, "crawlson")
+}
+
+fn demo_executable() -> PathBuf {
+    selected_executable(REAL_DEMO_BIN, "crawlson-demo")
+}
+
+fn selected_executable(variable: &str, fallback: &str) -> PathBuf {
+    match std::env::var_os(variable) {
+        Some(path) => {
+            let requested = PathBuf::from(path);
+            assert!(
+                requested.is_absolute(),
+                "{variable} must name an absolute packaged executable"
+            );
+            requested
+                .canonicalize()
+                .unwrap_or_else(|error| panic!("resolve {variable}: {error}"))
+        }
+        None => cargo_bin(fallback),
+    }
 }
 
 fn command_output(mut command: Command, label: &str) -> Output {

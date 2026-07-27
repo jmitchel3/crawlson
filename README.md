@@ -77,18 +77,21 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.4.0 CLI provides the first independently useful read-only vertical
+The Rust 0.5.0 CLI provides the first independently useful read-only vertical
 slice. It can run an explicitly authorized journey through `agent-browser`,
 retain raw evidence, render focused action images, and turn a completed run
 into either a verified guide or evidence-backed deterministic findings. The
-repository includes a credential-free demo of that complete loop. Autonomous
-agent exploration, authentication execution, mutations, and model-judged
-observations remain later vertical slices.
+repository includes a credential-free demo of that complete loop and a
+non-publishing release path for validating bundles and managed installation.
+No public 0.5.0 release exists yet: license selection, namespace reservation,
+and production signing-key custody remain owner decisions. Autonomous agent
+exploration, authentication execution, mutations, and model-judged observations
+remain later vertical slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
 ```console
-cargo build --bins
+cargo build --locked --bins
 ./target/debug/crawlson version
 ./target/debug/clson version
 ./target/debug/crawlson doctor
@@ -102,6 +105,45 @@ cargo build --bins
 `crawlson` is the canonical executable. `clson` is a small launcher that
 forwards every argument and exit status to the sibling `crawlson` executable,
 so `clson doctor` and `clson upgrade` have the same behavior.
+
+### Release bundles and managed installation
+
+Crawlson 0.5.0 defines deterministic bundles for four targets: Apple Silicon
+macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
+the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
+script and journey fixtures. The demo stays in the extracted bundle; managed
+installation copies only `crawlson` and `clson`.
+
+After extracting a bundle, its bundled canonical executable provides the
+first-party install path:
+
+```console
+./bin/crawlson install --from-bundle "$PWD" --prefix /absolute/path/to/bin
+```
+
+`--prefix` is the absolute destination directory for the two CLI binaries.
+Installation validates the target-specific bundle manifest and every payload
+before changing the destination, writes the managed-install receipt required by
+the updater, and rolls back the binaries and receipt together on failure. It
+does not elevate privileges or install `agent-browser`.
+
+Rollback covers failures observed by the installer. Abrupt process or machine
+termination during the final renames is not yet journal-recoverable; any
+inconsistent ownership state fails closed on the next operation.
+
+The signed release inventory authenticates complete downloadable bundles. A
+separate signed updater manifest deliberately lists only one raw `crawlson`
+payload per target; each raw payload must be byte-for-byte identical to that
+bundle's `bin/crawlson` member. Unix managed installs can replace that verified
+payload atomically. Direct Windows self-replacement remains fail-closed, so a
+Windows user upgrades by extracting the new bundle and rerunning the bundled
+`crawlson install` command.
+
+Release dry runs use test-only signing keys, retain their output only as CI
+artifacts, and have no permission or command capable of publishing a release.
+Those artifacts are not production releases and must not be promoted. See the
+[`release v1 contract`](docs/architecture/release-v1.md) for bundle layout,
+signing boundaries, installer behavior, and owner-gated publication work.
 
 `doctor` checks for a supported `agent-browser` without installing or changing
 it. Pass `--json` for one machine-readable object on stdout. Operational
@@ -124,8 +166,19 @@ From the repository root, choose a new or empty artifact directory and run:
 scripts/demo.sh --output-dir ./crawlson-demo-output
 ```
 
-The script builds Crawlson, starts a read-only loopback application, and runs
-three cases through the real browser adapter:
+The source-checkout command builds Crawlson. The same script included in an
+extracted release bundle accepts the packaged binaries explicitly and does not
+rebuild them:
+
+```console
+scripts/demo.sh \
+  --crawlson-bin "$PWD/bin/crawlson" \
+  --demo-bin "$PWD/bin/crawlson-demo" \
+  --output-dir ./crawlson-demo-output
+```
+
+Both forms start the read-only loopback application and run three cases through
+the real browser adapter:
 
 - a passing journey that renders a Markdown guide;
 - an intentional visible-text failure that renders JSON and Markdown findings;
@@ -269,11 +322,13 @@ receive a cached notice only.
 
 Release metadata must be immutable and bind each asset to GitHub's SHA-256
 digest. Crawlson additionally requires a Minisign signature over the exact
-update manifest and verifies the downloaded binary before same-directory atomic
-replacement on supported Unix installations. Direct Windows self-replacement
-fails closed until rollback is proven; Windows upgrades use the installer.
-Development builds fail closed until a release public key is embedded and
-signed assets are published.
+raw-payload update manifest and verifies the downloaded binary before
+same-directory atomic replacement on supported Unix installations. Direct
+Windows self-replacement fails closed; Windows users rerun the validated bundle
+installer so replacement and rollback happen outside the installed executable.
+Development and dry-run builds fail closed against the stable channel until a
+production release public key is embedded and owner-approved signed assets are
+published.
 
 Periodic update work is disabled by `CI`, `DO_NOT_TRACK=1`,
 `CRAWLSON_NO_UPDATE_CHECK=1`, `CRAWLSON_OFFLINE=1`, or
