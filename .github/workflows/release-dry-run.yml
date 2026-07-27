@@ -278,7 +278,7 @@ jobs:
           installed_clson="$INSTALL_PREFIX/clson$EXE_SUFFIX"
           bundled_demo="$BUNDLE_ROOT/bin/crawlson-demo$EXE_SUFFIX"
 
-          browser_session=()
+          browser_session=(bash)
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             # agent-browser keeps extension-bearing sessions headed so their
             # content scripts run. The Linux runner therefore needs a display.
@@ -287,10 +287,11 @@ jobs:
               xvfb-run
               --auto-servernum
               --server-args="-screen 0 1280x720x24"
+              bash
             )
           fi
 
-          "${browser_session[@]}" bash "$BUNDLE_ROOT/scripts/demo.sh" \
+          "${browser_session[@]}" "$BUNDLE_ROOT/scripts/demo.sh" \
             --crawlson-bin "$installed_crawlson" \
             --demo-bin "$bundled_demo" \
             --agent-browser "$AGENT_BROWSER_REAL_BIN" \
