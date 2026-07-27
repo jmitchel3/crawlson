@@ -49,6 +49,11 @@ The demo must bind to loopback only, use read-only HTTP behavior, reject non-loo
 - Pin the CI npm package to `agent-browser 0.26.0`, use its exact native binary,
   and retain install, test, demo, report, evidence, and server logs as one CI
   artifact.
+- Keep Chrome sandboxed in the real-browser gate. Crawlson does not forward the
+  ambient `CI` variable that makes agent-browser disable the sandbox, so the job
+  pins Ubuntu 22.04 and runs the upstream live-launch diagnostic with `CI`
+  removed. Ubuntu 24.04 AppArmor currently blocks the downloaded browser's
+  sandbox before its first command.
 
 ## Verification
 
@@ -68,6 +73,11 @@ The demo must bind to loopback only, use read-only HTTP behavior, reject non-loo
   and guide/finding links before printing success.
 - Full formatting, lint, portable test, release build, workflow, privacy, and
   shell checks are recorded in the delivery commit and pull request.
+- The first PR run proved that global `CRAWLSON_OFFLINE=1` invalidates explicit
+  manual-upgrade tests and that Ubuntu 24.04 rejects the sandboxed downloaded
+  browser launch. CI opt-outs now rely on the product's tested `CI` behavior,
+  while the real-browser job uses the sandbox-compatible pinned image and an
+  explicit sandboxed launch diagnostic.
 
 ## Delivered result
 

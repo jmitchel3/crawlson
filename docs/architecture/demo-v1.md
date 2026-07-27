@@ -80,8 +80,13 @@ ignored-test invocation is not allowed to silently pass: it requires
 opt-out.
 
 The dedicated Linux CI job pins `agent-browser 0.26.0`, installs its browser
-runtime, runs the artifact-producing documented demo before the independent
-integration assertions, and uploads logs and evidence with `if: always()`. The
+runtime, and requires an upstream live-launch diagnostic with ambient `CI`
+removed. This matters because Crawlson's driver does not forward `CI` and does
+not silently accept the upstream behavior of disabling Chrome's sandbox on CI
+runners. The job currently pins Ubuntu 22.04, where downloaded Chrome retains
+its sandbox; Ubuntu 24.04 AppArmor blocks that launch before the first command.
+The job then runs the artifact-producing documented demo before the independent
+integration assertions and uploads logs and evidence with `if: always()`. The
 aggregate `CI` check depends on both the cross-platform Rust suite and this
 real-browser job.
 

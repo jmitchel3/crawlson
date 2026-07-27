@@ -16,10 +16,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CI: "true"
-  CRAWLSON_AUTO_UPGRADE: "0"
-  CRAWLSON_NO_UPDATE_CHECK: "1"
-  CRAWLSON_OFFLINE: "1"
-  DO_NOT_TRACK: "1"
   NPM_CONFIG_UPDATE_NOTIFIER: "false"
   NO_UPDATE_NOTIFIER: "1"
 
@@ -56,7 +52,11 @@ jobs:
 
   real-browser:
     name: real agent-browser demo
-    runs-on: ubuntu-latest
+    # Crawlson intentionally does not forward CI to the driver, because
+    # agent-browser uses it to disable Chrome's sandbox. Downloaded Chrome can
+    # retain its sandbox on this runner image; Ubuntu 24.04 AppArmor currently
+    # blocks that sandbox before the first browser command.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -91,6 +91,12 @@ jobs:
           set -Eeuo pipefail
           "$AGENT_BROWSER_REAL_BIN" install --with-deps \
             2>&1 | tee ci-artifacts/agent-browser-install.log
+      - name: Require sandboxed upstream launch diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          env -u CI "$AGENT_BROWSER_REAL_BIN" doctor --offline --json \
+            2>&1 | tee ci-artifacts/agent-browser-doctor.json
       - name: Run the documented complete demo
         shell: bash
         run: |
