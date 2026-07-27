@@ -137,7 +137,7 @@ What it demonstrates:
 | Read-only default and per-step mutation declaration | The existing opt-in environment flags |
 | Fixture setup, cleanup, and cleanup outcome | Direct Reference Project fixture API calls |
 | `passed`, `failed`, `blocked`, and `error` outcomes | Playwright pass/fail/skip as the public result model |
-| Evidence references, timing, findings, and reproducible steps | Reference Project spotlight styling and wiki image paths |
+| Evidence references, timing, findings, and reproducible steps | Application-specific spotlight styling and wiki image paths |
 | Journey/run provenance for every artifact | Django guide tables, role grouping, and deploy-time ingestion |
 | Report schema and exit-code contract | The Reference Project deployment and hosting topology |
 
