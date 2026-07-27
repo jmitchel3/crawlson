@@ -6,6 +6,35 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-27
+
+### Added
+
+- A versioned release contract for deterministic target-specific bundles on
+  Apple Silicon macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux.
+- Bundles containing `crawlson`, `clson`, `crawlson-demo`, and the complete
+  credential-free demo fixtures, with a manifest that binds every payload by
+  path, size, and SHA-256 digest.
+- Separate signed release inventory and updater manifests: the inventory binds
+  complete bundles, while updater v1 contains only raw `crawlson` payloads that
+  must be byte-identical to each bundle's `bin/crawlson` member.
+- `crawlson install --from-bundle ROOT --prefix ABSOLUTE_BIN_DIR` for validated
+  first-party installation of the canonical CLI and alias, including managed
+  ownership receipt and rollback while leaving the demo bundle-local.
+- Packaged-demo binary overrides and a release dry-run that tests bundles,
+  installation, update ownership, failure rollback, and the complete
+  red-box/dimmed-screenshot journey without publishing.
+
+### Security
+
+- Release dry runs are read-only with respect to repository publication, use
+  test-only signing material, and cannot produce promotable release assets.
+- Unix self-upgrade remains a verified same-directory atomic replacement;
+  Windows self-upgrade remains fail-closed and directs users back to the bundle
+  installer.
+- Public release creation remains blocked on owner-selected licensing,
+  namespace reservation, and production Minisign key generation and custody.
+
 ## [0.4.0] - 2026-07-27
 
 ### Added

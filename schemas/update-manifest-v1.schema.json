@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/blob/main/schemas/update-manifest-v1.schema.json",
+  "title": "Crawlson update manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "version", "artifacts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "name", "size", "sha256"],
+        "properties": {
+          "target": {
+            "enum": [
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-(aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc\\.exe)$"
+          },
+          "size": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "target": { "const": "aarch64-apple-darwin" },
+                  "name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-aarch64-apple-darwin$" }
+                }
+              },
+              {
+                "properties": {
+                  "target": { "const": "x86_64-apple-darwin" },
+                  "name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-apple-darwin$" }
+                }
+              },
+              {
+                "properties": {
+                  "target": { "const": "x86_64-pc-windows-msvc" },
+                  "name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-pc-windows-msvc\\.exe$" }
+                }
+              },
+              {
+                "properties": {
+                  "target": { "const": "x86_64-unknown-linux-gnu" },
+                  "name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-unknown-linux-gnu$" }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

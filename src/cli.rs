@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::doctor::{self, DoctorOptions};
+use crate::install::{self, InstallOptions};
 use crate::render::{self, RenderOptions};
 use crate::runner::{self, RunOptions};
 use crate::update::{self, ManualUpgradeOptions};
@@ -37,6 +38,9 @@ enum Commands {
     /// Check for or install a Crawlson release.
     Upgrade(UpgradeArgs),
 
+    /// Install a verified release bundle without elevating privileges.
+    Install(InstallArgs),
+
     /// Run one validated, explicitly authorized read-only journey.
     Run(RunArgs),
 
@@ -64,6 +68,17 @@ struct UpgradeArgs {
     /// Perform no network access.
     #[arg(long)]
     offline: bool,
+}
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    /// Root of an unpacked Crawlson release bundle.
+    #[arg(long, value_name = "ROOT", required = true)]
+    from_bundle: PathBuf,
+
+    /// Absolute directory that will contain crawlson and clson.
+    #[arg(long, value_name = "ABSOLUTE_BIN_DIRECTORY", required = true)]
+    prefix: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -157,6 +172,11 @@ where
         Commands::Upgrade(args) => update::run_manual(ManualUpgradeOptions {
             check_only: args.check,
             offline: args.offline,
+            json: cli.json,
+        }),
+        Commands::Install(args) => install::run(InstallOptions {
+            bundle_root: args.from_bundle,
+            prefix: args.prefix,
             json: cli.json,
         }),
         Commands::Run(args) => {

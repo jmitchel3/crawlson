@@ -72,9 +72,11 @@ Done. Done means delivered to
 `main`, not production-ready. Production promotion remains a
 separate review after staging verification.
 
-`main` requires an up-to-date `CI` check, linear history, and resolved review
-conversations. Squash is the only merge method. After a pull request is scoped,
-reviewed, and eligible, arm it with:
+`main` requires the up-to-date aggregate `CI` and `Release dry run` checks,
+linear history, and resolved review conversations. The release check exercises
+all supported bundles without publishing; auto-merge must wait for both checks.
+Squash is the only merge method. After a pull request is scoped, reviewed, and
+eligible, arm it with:
 
 ```sh
 gh pr merge <number> --auto --squash

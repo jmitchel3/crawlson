@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 output_dir="$repo_root/crawlson-demo-output"
 agent_browser="agent-browser"
+crawlson_bin=""
+demo_bin=""
 demo_pid=""
 cleanup_started=0
 
@@ -78,12 +80,35 @@ require_artifact() {
   [[ -s "$path" ]] || fail "required artifact is missing or empty: $path"
 }
 
+resolve_executable() {
+  local option="$1"
+  local path="$2"
+  [[ -f "$path" ]] || fail "$option path is not a file: $path"
+  [[ -x "$path" ]] || fail "$option path is not executable: $path"
+  local directory
+  directory="$(cd "$(dirname "$path")" && pwd -P)" \
+    || fail "could not resolve $option path: $path"
+  printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
+resolve_agent_browser() {
+  local candidate="$1"
+  if [[ "$candidate" != */* ]]; then
+    candidate="$(command -v "$candidate" 2>/dev/null)" \
+      || fail "--agent-browser executable was not found on PATH: $1"
+  fi
+  resolve_executable --agent-browser "$candidate"
+}
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/demo.sh [--agent-browser PATH] [--output-dir DIRECTORY]
+                       [--crawlson-bin PATH --demo-bin PATH]
 
 Runs the passing, failing, and blocked Crawlson demo journeys and preserves all
-reports and evidence. The output directory must be absent or empty.
+reports and evidence. The output directory must be absent or empty. By default,
+the demo builds both Crawlson binaries from this checkout. Provide both binary
+overrides to run a packaged pair without rebuilding it.
 USAGE
 }
 
@@ -99,6 +124,18 @@ while [[ $# -gt 0 ]]; do
       output_dir="$2"
       shift 2
       ;;
+    --crawlson-bin)
+      [[ $# -ge 2 ]] || fail "--crawlson-bin requires a path"
+      [[ -n "$2" ]] || fail "--crawlson-bin requires a non-empty path"
+      crawlson_bin="$2"
+      shift 2
+      ;;
+    --demo-bin)
+      [[ $# -ge 2 ]] || fail "--demo-bin requires a path"
+      [[ -n "$2" ]] || fail "--demo-bin requires a non-empty path"
+      demo_bin="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -109,6 +146,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$crawlson_bin" || -n "$demo_bin" ]]; then
+  [[ -n "$crawlson_bin" && -n "$demo_bin" ]] \
+    || fail "--crawlson-bin and --demo-bin must be provided together"
+  crawlson_bin="$(resolve_executable --crawlson-bin "$crawlson_bin")"
+  demo_bin="$(resolve_executable --demo-bin "$demo_bin")"
+fi
+agent_browser="$(resolve_agent_browser "$agent_browser")"
 
 trap cleanup EXIT
 trap 'exit_after_signal 130' INT
@@ -127,9 +172,13 @@ cd "$repo_root"
 export CRAWLSON_NO_UPDATE_CHECK=1
 export CRAWLSON_OFFLINE=1
 
-cargo build --locked --bins
-crawlson_bin="$repo_root/target/debug/crawlson"
-demo_bin="$repo_root/target/debug/crawlson-demo"
+if [[ -z "$crawlson_bin" ]]; then
+  cargo build --locked --bins
+  crawlson_bin="$repo_root/target/debug/crawlson"
+  demo_bin="$repo_root/target/debug/crawlson-demo"
+fi
+[[ -x "$crawlson_bin" ]] || fail "Crawlson binary is not executable: $crawlson_bin"
+[[ -x "$demo_bin" ]] || fail "demo binary is not executable: $demo_bin"
 
 "$crawlson_bin" doctor --json --agent-browser "$agent_browser" >"$output_dir/doctor.json"
 

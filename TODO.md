@@ -54,8 +54,14 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [ ] Publish signed, immutable 0.1.0 artifacts and first-party installers after
-      license and namespace decisions are complete.
+- [x] Define the 0.5.0 four-target bundle, signed release inventory, raw-payload
+      update manifest, managed installer, and non-publishing dry-run contracts.
+- [ ] Prove a clean managed install and packaged demo from every 0.5.0 dry-run
+      bundle without using a production key or publishing a release.
+- [ ] Add a durable installer transaction journal and deterministic crash
+      recovery before claiming rollback across process or machine termination.
+- [ ] Publish signed, immutable 0.5.0 bundles and raw update payloads after the
+      license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts
 
@@ -148,7 +154,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 
 ## Phase 6: open-source readiness
 
-- [ ] Choose the license after confirming what can be extracted from the Reference Project.
+- [ ] Choose the public license before publishing artifacts.
 - [ ] Reserve appropriate package and repository namespaces.
 - [ ] Add contribution, security, and responsible-testing guidance.
 - [ ] Document supported targets and the authorization model prominently.
@@ -161,8 +167,10 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
   - [ ] Add mutation-denial coverage when a mutation contract exists.
 - [x] Prove that a clean source build can run the demo and reproduce the
       documented artifacts.
-- [ ] Publish signed installers only after a clean installed release can run the
-      demo and reproduce the documented artifacts.
+- [ ] Prove that a clean managed installation from each non-publishing dry-run
+      bundle can run the packaged demo and reproduce the documented artifacts.
+- [ ] Publish signed bundles only after that installed dry-run proof passes and
+      the owner-gated license, namespace, and production-key work is complete.
 
 ## Decisions to make deliberately
 
@@ -192,4 +200,11 @@ The first public MVP is done when a new contributor can:
 6. observe a missing credential or unsafe target fail closed; and
 7. run the same checks in CI with documented, predictable exit codes.
 
-No step in that demonstration may depend on the Reference Project or private credentials.
+No step in that demonstration may depend on the Reference Project or private
+credentials.
+
+A non-publishing dry run can prove this workflow from an extracted bundle and a
+clean managed prefix. The public-MVP definition of done nevertheless remains
+open until a new contributor can obtain and authenticate an owner-approved,
+signed public release; CI artifacts signed by test-only keys do not satisfy the
+installation requirement.

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/blob/main/schemas/release-inventory-v1.schema.json",
+  "title": "Crawlson release inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "version", "bundles"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "version": { "$ref": "#/$defs/version" },
+    "bundles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/bundle" }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "target": {
+      "enum": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+          "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+        },
+        "size": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "format",
+        "name",
+        "size",
+        "sha256",
+        "update_name",
+        "update_size",
+        "update_sha256",
+        "files"
+      ],
+      "properties": {
+        "target": { "$ref": "#/$defs/target" },
+        "format": { "enum": ["tar_gz", "zip"] },
+        "name": {
+          "type": "string",
+          "pattern": "^crawlson-v[0-9]+\\.[0-9]+\\.[0-9]+-(aarch64-apple-darwin|x86_64-apple-darwin|x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu)\\.(tar\\.gz|zip)$"
+        },
+        "size": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "update_name": {
+          "type": "string",
+          "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-(aarch64-apple-darwin|x86_64-apple-darwin|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc\\.exe)$"
+        },
+        "update_size": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "update_sha256": { "$ref": "#/$defs/digest" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/file" }
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "target": { "const": "aarch64-apple-darwin" },
+                "format": { "const": "tar_gz" },
+                "name": { "pattern": "^crawlson-v[0-9]+\\.[0-9]+\\.[0-9]+-aarch64-apple-darwin\\.tar\\.gz$" },
+                "update_name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-aarch64-apple-darwin$" }
+              }
+            },
+            {
+              "properties": {
+                "target": { "const": "x86_64-apple-darwin" },
+                "format": { "const": "tar_gz" },
+                "name": { "pattern": "^crawlson-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-apple-darwin\\.tar\\.gz$" },
+                "update_name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-apple-darwin$" }
+              }
+            },
+            {
+              "properties": {
+                "target": { "const": "x86_64-pc-windows-msvc" },
+                "format": { "const": "zip" },
+                "name": { "pattern": "^crawlson-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-pc-windows-msvc\\.zip$" },
+                "update_name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-pc-windows-msvc\\.exe$" }
+              }
+            },
+            {
+              "properties": {
+                "target": { "const": "x86_64-unknown-linux-gnu" },
+                "format": { "const": "tar_gz" },
+                "name": { "pattern": "^crawlson-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-unknown-linux-gnu\\.tar\\.gz$" },
+                "update_name": { "pattern": "^crawlson-update-v[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-unknown-linux-gnu$" }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

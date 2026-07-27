@@ -13,16 +13,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use thiserror::Error;
+use url::Url;
 
+use crate::release::{
+    MAX_RELEASE_FILE_BYTES, UPDATE_MANIFEST_NAME, UPDATE_SIGNATURE_NAME, UpdateManifestV1,
+};
 use crate::{BUILD_TARGET, CommandResult, VERSION};
 
 const RELEASE_API: &str = "https://api.github.com/repos/jmitchel3/crawlson/releases/latest";
-const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/jmitchel3/crawlson/releases/download/";
-const MANIFEST_NAME: &str = "crawlson-update.json";
-const SIGNATURE_NAME: &str = "crawlson-update.json.minisig";
 const UPDATE_PUBLIC_KEY: Option<&str> = option_env!("CRAWLSON_UPDATE_PUBLIC_KEY");
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
-const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const CHECK_SUCCESS_INTERVAL: u64 = 7 * 24 * 60 * 60;
 const CHECK_FAILURE_INTERVAL: u64 = 24 * 60 * 60;
 const SUCCESS_JITTER_MAX: u64 = 48 * 60 * 60;
@@ -134,20 +134,7 @@ struct GithubAsset {
     browser_download_url: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateManifest {
-    schema_version: u8,
-    version: Version,
-    artifacts: Vec<ManifestArtifact>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestArtifact {
-    target: String,
-    name: String,
-    size: u64,
-    sha256: String,
-}
+type UpdateManifest = UpdateManifestV1;
 
 #[derive(Debug)]
 struct GithubSignedBackend {
@@ -196,8 +183,12 @@ impl GithubSignedBackend {
             .map_err(|error| UpdateError::InvalidMetadata(error.to_string()))
     }
 
-    fn download_metadata(&self, asset: &GithubAsset) -> Result<Vec<u8>, UpdateError> {
-        validate_download_url(&asset.browser_download_url)?;
+    fn download_metadata(
+        &self,
+        asset: &GithubAsset,
+        release_tag: &str,
+    ) -> Result<Vec<u8>, UpdateError> {
+        validate_asset_download_url(&asset.browser_download_url, release_tag, &asset.name)?;
         if asset.size == 0 || asset.size > MAX_METADATA_BYTES {
             return Err(UpdateError::InvalidMetadata(format!(
                 "{} has invalid size {}",
@@ -239,10 +230,10 @@ impl UpdateBackend for GithubSignedBackend {
             ));
         }
 
-        let manifest_asset = find_uploaded_asset(&release.assets, MANIFEST_NAME)?;
-        let signature_asset = find_uploaded_asset(&release.assets, SIGNATURE_NAME)?;
-        let manifest_bytes = self.download_metadata(manifest_asset)?;
-        let signature_bytes = self.download_metadata(signature_asset)?;
+        let manifest_asset = find_uploaded_asset(&release.assets, UPDATE_MANIFEST_NAME)?;
+        let signature_asset = find_uploaded_asset(&release.assets, UPDATE_SIGNATURE_NAME)?;
+        let manifest_bytes = self.download_metadata(manifest_asset, &release.tag_name)?;
+        let signature_bytes = self.download_metadata(signature_asset, &release.tag_name)?;
         verify_manifest_signature(public_key_text, &manifest_bytes, &signature_bytes)?;
 
         let manifest: UpdateManifest = serde_json::from_slice(&manifest_bytes)
@@ -285,7 +276,7 @@ impl UpdateBackend for GithubSignedBackend {
                 break;
             }
             total = total.saturating_add(read as u64);
-            if total > candidate.size || total > MAX_BINARY_BYTES {
+            if total > candidate.size || total > MAX_RELEASE_FILE_BYTES {
                 return Err(UpdateError::Verification(
                     "download exceeded the signed size".to_owned(),
                 ));
@@ -317,13 +308,23 @@ impl UpdateBackend for GithubSignedBackend {
 
 pub fn run_manual(options: ManualUpgradeOptions) -> CommandResult {
     let backend = GithubSignedBackend::new();
-    run_manual_with_backend(options, &backend, installation_ownership())
+    run_manual_with_backend_lock(options, &backend, installation_ownership(), true)
 }
 
+#[cfg(test)]
 fn run_manual_with_backend(
     options: ManualUpgradeOptions,
     backend: &dyn UpdateBackend,
     ownership: InstallOwnership,
+) -> CommandResult {
+    run_manual_with_backend_lock(options, backend, ownership, false)
+}
+
+fn run_manual_with_backend_lock(
+    options: ManualUpgradeOptions,
+    backend: &dyn UpdateBackend,
+    ownership: InstallOwnership,
+    lock_replacement: bool,
 ) -> CommandResult {
     let current = Version::parse(VERSION).expect("Cargo package version is valid semver");
     if options.offline || env_truthy("CRAWLSON_OFFLINE") {
@@ -443,6 +444,79 @@ fn run_manual_with_backend(
         }
     };
 
+    let _replacement_lock = if lock_replacement {
+        let Some(paths) = UpdatePaths::discover() else {
+            return render_upgrade(
+                options.json,
+                1,
+                UpgradeReport {
+                    schema_version: 1,
+                    status: UpgradeStatus::Error,
+                    current_version: current,
+                    latest_version: Some(candidate.version),
+                    release_url: Some(candidate.release_url),
+                    message: "could not determine the Crawlson update-state directory".to_owned(),
+                },
+            );
+        };
+        match try_update_lock(&paths) {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => {
+                return render_upgrade(
+                    options.json,
+                    1,
+                    UpgradeReport {
+                        schema_version: 1,
+                        status: UpgradeStatus::Blocked,
+                        current_version: current,
+                        latest_version: Some(candidate.version),
+                        release_url: Some(candidate.release_url),
+                        message: "another Crawlson update is already in progress".to_owned(),
+                    },
+                );
+            }
+            Err(error) => {
+                return render_upgrade(
+                    options.json,
+                    1,
+                    UpgradeReport {
+                        schema_version: 1,
+                        status: UpgradeStatus::Error,
+                        current_version: current,
+                        latest_version: Some(candidate.version),
+                        release_url: Some(candidate.release_url),
+                        message: error.to_string(),
+                    },
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if lock_replacement {
+        match installation_ownership() {
+            InstallOwnership::Standalone(current_install)
+                if current_install == install && installed_binary_is_running_version(&install) => {}
+            InstallOwnership::Standalone(_)
+            | InstallOwnership::PackageManager { .. }
+            | InstallOwnership::Unknown => {
+                return render_upgrade(
+                    options.json,
+                    1,
+                    UpgradeReport {
+                        schema_version: 1,
+                        status: UpgradeStatus::Blocked,
+                        current_version: current,
+                        latest_version: Some(candidate.version),
+                        release_url: Some(candidate.release_url),
+                        message: "managed-install ownership changed while checking for updates"
+                            .to_owned(),
+                    },
+                );
+            }
+        }
+    }
+
     match backend.install(&candidate, &install) {
         Ok(()) => render_upgrade(
             options.json,
@@ -469,6 +543,27 @@ fn run_manual_with_backend(
             },
         ),
     }
+}
+
+fn installed_binary_is_running_version(install: &ManagedInstall) -> bool {
+    let Ok(output) = Command::new(&install.binary)
+        .args(["--json", "version"])
+        .env("CRAWLSON_NO_UPDATE_CHECK", "1")
+        .env("CI", "1")
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() || !output.stderr.is_empty() || output.stdout.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    report.get("schema_version") == Some(&serde_json::Value::from(1))
+        && report.get("name").and_then(serde_json::Value::as_str) == Some("crawlson")
+        && report.get("version").and_then(serde_json::Value::as_str) == Some(VERSION)
+        && report.get("target").and_then(serde_json::Value::as_str) == Some(BUILD_TARGET)
 }
 
 fn render_upgrade(json: bool, exit_code: u8, report: UpgradeReport) -> CommandResult {
@@ -565,21 +660,9 @@ fn periodic_worker(
     now: u64,
     backend: &dyn UpdateBackend,
 ) -> Result<(), UpdateError> {
-    if let Some(parent) = paths.lock.parent() {
-        fs::create_dir_all(parent).map_err(state_error)?;
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&paths.lock)
-        .map_err(state_error)?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Ok(()),
-        Err(fs::TryLockError::Error(error)) => return Err(state_error(error)),
-    }
+    let Some(_lock) = try_update_lock(paths)? else {
+        return Ok(());
+    };
 
     let ownership = installation_ownership();
     let install_id = match &ownership {
@@ -629,6 +712,24 @@ fn periodic_worker(
     write_state(&paths.state, &state)
 }
 
+pub(crate) fn try_update_lock(paths: &UpdatePaths) -> Result<Option<fs::File>, UpdateError> {
+    if let Some(parent) = paths.lock.parent() {
+        fs::create_dir_all(parent).map_err(state_error)?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(state_error)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(state_error(error)),
+    }
+}
+
 fn cached_notice() -> Option<String> {
     if !periodic_allowed(
         PeriodicContext::from_env(),
@@ -672,7 +773,7 @@ impl UpdateState {
     }
 }
 
-fn generated_install_id() -> String {
+pub(crate) fn generated_install_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -686,16 +787,16 @@ fn generated_install_id() -> String {
     )
 }
 
-#[derive(Debug)]
-struct UpdatePaths {
-    config: PathBuf,
-    receipt: PathBuf,
-    state: PathBuf,
-    lock: PathBuf,
+#[derive(Debug, Clone)]
+pub(crate) struct UpdatePaths {
+    pub(crate) config: PathBuf,
+    pub(crate) receipt: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) lock: PathBuf,
 }
 
 impl UpdatePaths {
-    fn discover() -> Option<Self> {
+    pub(crate) fn discover() -> Option<Self> {
         if let Some(root) = env::var_os("CRAWLSON_HOME") {
             let root = PathBuf::from(root);
             return Some(Self {
@@ -726,13 +827,14 @@ struct UpdatesConfig {
     mode: Option<UpdateMode>,
 }
 
-#[derive(Debug, Deserialize)]
-struct InstallReceipt {
-    schema_version: u8,
-    kind: String,
-    target: String,
-    binary: PathBuf,
-    install_id: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstallReceipt {
+    pub(crate) schema_version: u8,
+    pub(crate) kind: String,
+    pub(crate) target: String,
+    pub(crate) binary: PathBuf,
+    pub(crate) install_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -753,11 +855,7 @@ fn installation_ownership() -> InstallOwnership {
     if let Some(paths) = UpdatePaths::discover()
         && let Ok(bytes) = fs::read(paths.receipt)
         && let Ok(receipt) = serde_json::from_slice::<InstallReceipt>(&bytes)
-        && receipt.schema_version == 1
-        && receipt.kind == "standalone"
-        && receipt.target == BUILD_TARGET
-        && !receipt.install_id.trim().is_empty()
-        && fs::canonicalize(receipt.binary).ok().as_ref() == Some(&current)
+        && receipt_manages_binary(&receipt, &current)
     {
         return InstallOwnership::Standalone(ManagedInstall {
             binary: current,
@@ -768,17 +866,57 @@ fn installation_ownership() -> InstallOwnership {
     InstallOwnership::Unknown
 }
 
-fn package_manager_hint(current: &Path) -> Option<&'static str> {
+pub(crate) fn package_manager_hint(current: &Path) -> Option<&'static str> {
     let path = current.to_string_lossy().to_ascii_lowercase();
     if path.contains("/.cargo/bin/") || path.contains("\\.cargo\\bin\\") {
         Some("cargo install crawlson --locked --force")
-    } else if path.contains("/cellar/") || path.contains("/homebrew/") {
+    } else if path.contains("/cellar/")
+        || path.contains("/homebrew/")
+        || path.contains("/linuxbrew/")
+    {
         Some("brew upgrade crawlson")
     } else if path.contains("/nix/store/") {
         Some("use the Nix configuration that installed Crawlson")
+    } else if path.contains("\\scoop\\apps\\") {
+        Some("scoop update crawlson")
+    } else if path.contains("\\chocolatey\\bin\\") {
+        Some("choco upgrade crawlson")
+    } else if path.contains("\\winget\\packages\\") {
+        Some("winget upgrade crawlson")
     } else {
         None
     }
+}
+
+pub(crate) fn receipt_manages_binary(receipt: &InstallReceipt, binary: &Path) -> bool {
+    let (Ok(receipt_binary), Ok(binary)) =
+        (fs::canonicalize(&receipt.binary), fs::canonicalize(binary))
+    else {
+        return false;
+    };
+    receipt.schema_version == 1
+        && receipt.kind == "standalone"
+        && receipt.target == BUILD_TARGET
+        && !receipt.install_id.trim().is_empty()
+        && receipt_binary == binary
+}
+
+pub(crate) fn write_install_receipt(
+    path: &Path,
+    receipt: &InstallReceipt,
+) -> Result<(), UpdateError> {
+    let mut bytes = serde_json::to_vec(receipt).map_err(state_error)?;
+    bytes.push(b'\n');
+    write_install_receipt_bytes(path, &bytes)
+}
+
+pub(crate) fn write_install_receipt_bytes(path: &Path, bytes: &[u8]) -> Result<(), UpdateError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(state_error)?;
+    }
+    let mut file = AtomicWriteFile::open(path).map_err(state_error)?;
+    file.write_all(bytes).map_err(state_error)?;
+    file.commit().map_err(state_error)
 }
 
 fn configured_mode(ownership: InstallOwnership) -> UpdateMode {
@@ -888,9 +1026,9 @@ fn write_state(path: &Path, state: &UpdateState) -> Result<(), UpdateError> {
 }
 
 fn validate_candidate_version(current: &Version, candidate: &Version) -> Result<(), String> {
-    if !candidate.pre.is_empty() {
+    if !candidate.pre.is_empty() || !candidate.build.is_empty() {
         return Err(format!(
-            "refusing prerelease update candidate {candidate} on the stable channel"
+            "refusing non-stable update candidate {candidate} on the stable channel"
         ));
     }
     if candidate == current {
@@ -945,32 +1083,20 @@ fn verified_candidate_from_manifest(
             "the latest release is not a stable immutable release".to_owned(),
         ));
     }
-    if manifest.schema_version != 1 {
-        return Err(UpdateError::InvalidMetadata(format!(
-            "unsupported manifest schema {}",
-            manifest.schema_version
-        )));
-    }
-    let tag_version = release
-        .tag_name
-        .strip_prefix('v')
-        .unwrap_or(&release.tag_name);
-    if manifest.version.to_string() != tag_version || !manifest.version.pre.is_empty() {
+    manifest
+        .validate()
+        .map_err(|error| UpdateError::InvalidMetadata(error.to_string()))?;
+    if release.tag_name != format!("v{}", manifest.version) {
         return Err(UpdateError::InvalidMetadata(
             "manifest version does not match the stable release tag".to_owned(),
         ));
     }
+    validate_release_url(&release.html_url, &release.tag_name)?;
     let artifact = manifest
         .artifacts
         .iter()
         .find(|artifact| artifact.target == target)
         .ok_or_else(|| UpdateError::UnsupportedTarget(target.to_owned()))?;
-    validate_sha256(&artifact.sha256)?;
-    if artifact.size == 0 || artifact.size > MAX_BINARY_BYTES {
-        return Err(UpdateError::InvalidMetadata(
-            "manifest artifact size is outside the accepted range".to_owned(),
-        ));
-    }
     let release_asset = find_uploaded_asset(&release.assets, &artifact.name)?;
     if release_asset.size != artifact.size {
         return Err(UpdateError::InvalidMetadata(
@@ -983,7 +1109,11 @@ fn verified_candidate_from_manifest(
             "manifest and GitHub asset digests disagree".to_owned(),
         ));
     }
-    validate_download_url(&release_asset.browser_download_url)?;
+    validate_asset_download_url(
+        &release_asset.browser_download_url,
+        &release.tag_name,
+        &artifact.name,
+    )?;
 
     Ok(VerifiedCandidate {
         version: manifest.version.clone(),
@@ -1000,28 +1130,79 @@ fn find_uploaded_asset<'a>(
     assets: &'a [GithubAsset],
     name: &str,
 ) -> Result<&'a GithubAsset, UpdateError> {
-    assets
+    let mut matches = assets
         .iter()
-        .find(|asset| asset.name == name && asset.state == "uploaded")
-        .ok_or_else(|| UpdateError::InvalidMetadata(format!("missing release asset {name}")))
+        .filter(|asset| asset.name == name && asset.state == "uploaded");
+    let asset = matches
+        .next()
+        .ok_or_else(|| UpdateError::InvalidMetadata(format!("missing release asset {name}")))?;
+    if matches.next().is_some() {
+        return Err(UpdateError::InvalidMetadata(format!(
+            "duplicate release asset {name}"
+        )));
+    }
+    Ok(asset)
 }
 
 fn validate_download_url(url: &str) -> Result<(), UpdateError> {
-    if url.starts_with(RELEASE_DOWNLOAD_PREFIX) {
+    let parsed = Url::parse(url).map_err(|error| {
+        UpdateError::InvalidMetadata(format!("invalid release asset URL: {error}"))
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed
+            .path()
+            .starts_with("/jmitchel3/crawlson/releases/download/")
+    {
+        Err(UpdateError::InvalidMetadata(
+            "release asset URL is outside the canonical Crawlson repository".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_asset_download_url(
+    url: &str,
+    release_tag: &str,
+    asset_name: &str,
+) -> Result<(), UpdateError> {
+    validate_download_url(url)?;
+    let parsed = Url::parse(url).map_err(|error| {
+        UpdateError::InvalidMetadata(format!("invalid release asset URL: {error}"))
+    })?;
+    let expected = format!("/jmitchel3/crawlson/releases/download/{release_tag}/{asset_name}");
+    if parsed.path() == expected {
         Ok(())
     } else {
         Err(UpdateError::InvalidMetadata(
-            "release asset URL is outside the canonical Crawlson repository".to_owned(),
+            "release asset URL does not match its release tag and name".to_owned(),
         ))
     }
 }
 
-fn validate_sha256(digest: &str) -> Result<(), UpdateError> {
-    if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+fn validate_release_url(url: &str, release_tag: &str) -> Result<(), UpdateError> {
+    let parsed = Url::parse(url)
+        .map_err(|error| UpdateError::InvalidMetadata(format!("invalid release URL: {error}")))?;
+    let expected = format!("/jmitchel3/crawlson/releases/tag/{release_tag}");
+    if parsed.scheme() == "https"
+        && parsed.host_str() == Some("github.com")
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.path() == expected
+    {
         Ok(())
     } else {
         Err(UpdateError::InvalidMetadata(
-            "artifact SHA-256 is malformed".to_owned(),
+            "release URL is outside the canonical Crawlson repository".to_owned(),
         ))
     }
 }
@@ -1175,6 +1356,10 @@ mod tests {
             validate_candidate_version(&current, &Version::parse("0.2.0-alpha.1").unwrap())
                 .is_err()
         );
+        assert!(
+            validate_candidate_version(&current, &Version::parse("0.2.0+rebuilt").unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1235,6 +1420,18 @@ mod tests {
             .is_ok()
         );
         assert!(validate_download_url("https://example.com/crawlson").is_err());
+        assert!(
+            validate_download_url(
+                "https://github.com.evil.example/jmitchel3/crawlson/releases/download/v1/a"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_download_url(
+                "https://github.com/jmitchel3/crawlson/releases/download/v1/a?redirect=1"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1252,7 +1449,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn check_only_never_invokes_the_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.4.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: true,
@@ -1272,7 +1469,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn managed_manual_upgrade_invokes_the_injected_installer() {
-        let backend = FakeBackend::new(Some(candidate("0.4.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1294,7 +1491,7 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     #[test]
     fn rendered_manual_policy_rejects_downgrades_and_prereleases() {
-        for version in ["0.3.9", "0.4.1-alpha.1"] {
+        for version in ["0.4.9", "0.5.1-alpha.1"] {
             let backend = FakeBackend::new(Some(candidate(version)));
             let result = run_manual_with_backend(
                 ManualUpgradeOptions {
@@ -1322,12 +1519,18 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             package_manager_hint(Path::new("/opt/homebrew/Cellar/crawlson/0.1/bin/crawlson")),
             Some("brew upgrade crawlson")
         );
+        assert_eq!(
+            package_manager_hint(Path::new(
+                r"C:\Users\fixture\scoop\apps\crawlson\current\crawlson.exe"
+            )),
+            Some("scoop update crawlson")
+        );
         assert!(package_manager_hint(Path::new("/opt/crawlson/bin/crawlson")).is_none());
     }
 
     #[test]
     fn unknown_installations_fail_closed_before_replacement() {
-        let backend = FakeBackend::new(Some(candidate("0.1.1")));
+        let backend = FakeBackend::new(Some(candidate("0.5.1")));
         let result = run_manual_with_backend(
             ManualUpgradeOptions {
                 check_only: false,
@@ -1363,6 +1566,21 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
         periodic_worker(&paths, 1_000_001, &backend).unwrap();
         assert_eq!(backend.checks.get(), 1);
+    }
+
+    #[test]
+    fn replacement_lock_is_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths {
+            config: directory.path().join("config.toml"),
+            receipt: directory.path().join("install.json"),
+            state: directory.path().join("state.json"),
+            lock: directory.path().join("update.lock"),
+        };
+        let first = try_update_lock(&paths).unwrap().unwrap();
+        assert!(try_update_lock(&paths).unwrap().is_none());
+        drop(first);
+        assert!(try_update_lock(&paths).unwrap().is_some());
     }
 
     #[test]
@@ -1428,16 +1646,37 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
     #[test]
     fn manifest_and_release_metadata_must_agree_exactly() {
         let (mut release, manifest) = release_and_manifest();
-        let candidate =
-            verified_candidate_from_manifest(&release, &manifest, "test-target").unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let candidate = verified_candidate_from_manifest(&release, &manifest, target).unwrap();
         assert_eq!(candidate.version, Version::parse("0.1.1").unwrap());
 
         release.immutable = false;
-        assert!(verified_candidate_from_manifest(&release, &manifest, "test-target").is_err());
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
         release.immutable = true;
         release.assets[0].digest = Some(format!("sha256:{}", "f".repeat(64)));
-        assert!(verified_candidate_from_manifest(&release, &manifest, "test-target").is_err());
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
         assert!(verified_candidate_from_manifest(&release, &manifest, "wrong-target").is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_ambiguous_or_noncanonical_release_metadata() {
+        let (mut release, mut manifest) = release_and_manifest();
+        let target = "x86_64-unknown-linux-gnu";
+
+        release.assets.push(release.assets[0].clone());
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
+        release.assets.pop();
+
+        release.tag_name = "0.1.1".to_owned();
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
+        release.tag_name = "v0.1.1".to_owned();
+
+        manifest.artifacts[0].sha256 = "A".repeat(64);
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
+        manifest.artifacts[0].sha256 = "0".repeat(64);
+
+        manifest.artifacts.push(manifest.artifacts[0].clone());
+        assert!(verified_candidate_from_manifest(&release, &manifest, target).is_err());
     }
 
     fn candidate(version: &str) -> VerifiedCandidate {
@@ -1456,30 +1695,31 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
     fn release_and_manifest() -> (GithubRelease, UpdateManifest) {
         let digest = "0".repeat(64);
+        let target = "x86_64-unknown-linux-gnu";
+        let name = "crawlson-update-v0.1.1-x86_64-unknown-linux-gnu";
         (
             GithubRelease {
                 tag_name: "v0.1.1".to_owned(),
-                html_url: "https://github.com/jmitchel3/crawlson/releases/tag/v0.1.1"
-                    .to_owned(),
+                html_url: "https://github.com/jmitchel3/crawlson/releases/tag/v0.1.1".to_owned(),
                 draft: false,
                 prerelease: false,
                 immutable: true,
                 assets: vec![GithubAsset {
-                    name: "crawlson-test".to_owned(),
+                    name: name.to_owned(),
                     state: "uploaded".to_owned(),
                     size: 10,
                     digest: Some(format!("sha256:{digest}")),
-                    browser_download_url:
-                        "https://github.com/jmitchel3/crawlson/releases/download/v0.1.1/crawlson-test"
-                            .to_owned(),
+                    browser_download_url: format!(
+                        "https://github.com/jmitchel3/crawlson/releases/download/v0.1.1/{name}"
+                    ),
                 }],
             },
             UpdateManifest {
                 schema_version: 1,
                 version: Version::parse("0.1.1").unwrap(),
-                artifacts: vec![ManifestArtifact {
-                    target: "test-target".to_owned(),
-                    name: "crawlson-test".to_owned(),
+                artifacts: vec![crate::release::UpdateArtifactV1 {
+                    target: target.to_owned(),
+                    name: name.to_owned(),
                     size: 10,
                     sha256: digest,
                 }],

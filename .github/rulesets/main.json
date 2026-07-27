@@ -37,6 +37,9 @@
         "required_status_checks": [
           {
             "context": "CI"
+          },
+          {
+            "context": "Release dry run"
           }
         ],
         "strict_required_status_checks_policy": true
