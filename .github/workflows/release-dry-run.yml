@@ -96,6 +96,9 @@ jobs:
           extension_browser=""
           while IFS= read -r candidate; do
             case "$candidate" in
+              */chrome-*/chrome|\
+              */chrome-*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
+              */chrome-*/chrome.exe|\
               */chrome-*/chrome-linux*/chrome|\
               */chrome-*/chrome-mac*/Google\ Chrome\ for\ Testing.app/Contents/MacOS/Google\ Chrome\ for\ Testing|\
               */chrome-*/chrome-win*/chrome.exe|\
