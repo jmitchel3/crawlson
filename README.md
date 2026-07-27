@@ -52,7 +52,7 @@ observable user journey.
 6. **Stay runner-agnostic.** Browser drivers, agent runtimes, report formats, and
    application adapters should be replaceable.
 
-## Possible shape
+## Initial shape
 
 The initial tool may include:
 
@@ -64,11 +64,16 @@ The initial tool may include:
 - Markdown guide generation from verified runs; and
 - local CLI and CI integrations.
 
-The implementation language, public API, journey format, and package layout are
-intentionally undecided. `agent-browser` is the initial execution path, while
-its integration boundary should remain replaceable. The first design task is to
-reduce the existing Reference Project guide workflow to the smallest useful,
-application-independent core.
+The MVP core and CLI will be written in Rust. `agent-browser` is the initial
+execution path, integrated through its supported process and JSON interface so
+the boundary remains replaceable. The public API, journey format, and package
+layout are still intentionally undecided. See
+[`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
+for the runtime comparison, adapter lifecycle, safety ownership, and exact
+fallback criteria.
+
+The first design task is to reduce the existing Reference Project guide
+workflow to the smallest useful, application-independent core.
 
 ## Status
 
