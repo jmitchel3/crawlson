@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::doctor::{self, CheckStatus, DoctorOptions};
 use crate::driver::{
-    AgentBrowserDriver, BrowserDriver, DiagnosticsSummary, DriverCommandRecord, DriverError,
+    AgentBrowserDriver, BrowserDriver, CaptureBundle, DiagnosticsSummary, DriverCommandRecord,
+    DriverError, DriverPolicyMode,
 };
 use crate::focus::{self, CssBox, FocusRequest, Viewport};
 use crate::journey::{self, Origin, TextComparison, ValidatedAction, ValidatedJourney, hex_digest};
@@ -24,6 +26,7 @@ pub const EXIT_ERROR: u8 = 4;
 pub struct RunOptions {
     pub journey_path: PathBuf,
     pub allowed_origin: Option<String>,
+    pub allowed_actions: Vec<String>,
     pub output_directory: PathBuf,
     pub agent_browser: Option<PathBuf>,
     pub action_timeout: Duration,
@@ -68,6 +71,8 @@ pub struct RunReport {
     pub journey: JourneyProvenance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_authorization: Option<ActionAuthorizationReport>,
     pub started_at_unix_ms: u64,
     pub finished_at_unix_ms: u64,
     pub duration_ms: u64,
@@ -81,6 +86,13 @@ pub struct RunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<DiagnosticsSummary>,
     pub cleanup: CleanupReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionAuthorizationReport {
+    pub required: Vec<String>,
+    pub granted: Vec<String>,
+    pub binding_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +145,8 @@ pub struct StepObservation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_text_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<String>,
@@ -148,6 +162,25 @@ pub struct StepObservation {
     pub screenshot_command_sequence: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_state: Option<ActionState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_grant_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_command_sequence: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_href: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionState {
+    NotAttempted,
+    DriverAcknowledged,
+    EffectVerified,
+    EffectUnknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +283,16 @@ pub fn run(options: RunOptions) -> RunReport {
     report.journey.id = Some(journey.meta.id.clone());
     report.journey.revision = Some(journey.meta.revision);
     report.target_origin = Some(journey.origin.to_string());
+    report.schema_version = if journey.schema_version >= 3 { 2 } else { 1 };
+    // Build action provenance before the other fail-closed preconditions so a
+    // v3 report remains structurally renderable even when target authorization
+    // or authentication blocks execution first. Preserve those earlier safety
+    // reasons by applying the action-authorization result only afterwards.
+    let action_authorization = authorize_actions(
+        &journey,
+        &options.allowed_actions,
+        &mut report.action_authorization,
+    );
 
     let Some(allowed_origin) = options.allowed_origin.as_deref() else {
         finish_blocked(
@@ -288,9 +331,14 @@ pub fn run(options: RunOptions) -> RunReport {
         finish_blocked(
             &mut report,
             "authentication_unavailable",
-            "this journey requires authentication, which is not available in read-only journey v1"
+            "this journey requires authentication, but no authentication adapter is available"
                 .to_owned(),
         );
+        return finalize(report, overall_start, &run_root);
+    }
+
+    if let Err((code, message)) = action_authorization {
+        finish_blocked(&mut report, code, message);
         return finalize(report, overall_start, &run_root);
     }
 
@@ -324,13 +372,23 @@ pub fn run(options: RunOptions) -> RunReport {
     report.driver.version = check.detected_version.as_ref().map(ToString::to_string);
     let session = session_name(&run_id);
     report.driver.session = Some(session.clone());
-    let mut driver = match AgentBrowserDriver::new(
+    let policy_mode = if journey
+        .steps
+        .iter()
+        .any(|step| matches!(step.action, ValidatedAction::FollowLink { .. }))
+    {
+        DriverPolicyMode::FollowLink
+    } else {
+        DriverPolicyMode::ReadOnly
+    };
+    let mut driver = match AgentBrowserDriver::new_with_policy_mode(
         executable,
         &run_root,
         journey.origin.clone(),
         session,
         options.action_timeout,
         options.run_timeout,
+        policy_mode,
     ) {
         Ok(driver) => driver,
         Err(error) => {
@@ -348,6 +406,130 @@ pub fn run(options: RunOptions) -> RunReport {
     finalize(report, overall_start, &run_root)
 }
 
+fn authorize_actions(
+    journey: &ValidatedJourney,
+    supplied: &[String],
+    report: &mut Option<ActionAuthorizationReport>,
+) -> Result<(), (&'static str, String)> {
+    let required = journey
+        .steps
+        .iter()
+        .filter(|step| matches!(step.action, ValidatedAction::FollowLink { .. }))
+        .map(|step| action_grant(journey, &step.id))
+        .collect::<BTreeSet<_>>();
+    if supplied.iter().any(|grant| !valid_action_grant(grant)) {
+        if journey.schema_version >= 3 || !required.is_empty() {
+            let required_values = required.iter().cloned().collect::<Vec<_>>();
+            let binding = action_authorization_binding(journey, &required_values, &[]);
+            *report = Some(ActionAuthorizationReport {
+                required: required_values,
+                granted: Vec::new(),
+                binding_sha256: hex_digest(binding.as_bytes()),
+            });
+        }
+        return Err((
+            "action_authorization_invalid",
+            "action authorization grant syntax is invalid".to_owned(),
+        ));
+    }
+    let granted = supplied.iter().cloned().collect::<BTreeSet<_>>();
+    let duplicates = granted.len() != supplied.len();
+
+    if required.is_empty() {
+        if journey.schema_version >= 3 {
+            let binding = action_authorization_binding(journey, &[], &[]);
+            *report = Some(ActionAuthorizationReport {
+                required: Vec::new(),
+                granted: Vec::new(),
+                binding_sha256: hex_digest(binding.as_bytes()),
+            });
+        }
+        return if granted.is_empty() {
+            Ok(())
+        } else {
+            Err((
+                "action_authorization_unexpected",
+                "this journey declares no interactive action to authorize".to_owned(),
+            ))
+        };
+    }
+
+    let required_values = required.iter().cloned().collect::<Vec<_>>();
+    let granted_values = granted.iter().cloned().collect::<Vec<_>>();
+    let binding = action_authorization_binding(journey, &required_values, &granted_values);
+    *report = Some(ActionAuthorizationReport {
+        required: required_values,
+        granted: granted_values,
+        binding_sha256: hex_digest(binding.as_bytes()),
+    });
+
+    if duplicates {
+        return Err((
+            "action_authorization_invalid",
+            "action authorization grants must not be duplicated".to_owned(),
+        ));
+    }
+    if required != granted {
+        let missing = required.difference(&granted).cloned().collect::<Vec<_>>();
+        let message = if !missing.is_empty() {
+            format!(
+                "explicit action authorization is required; rerun with {}",
+                missing
+                    .iter()
+                    .map(|grant| format!("--allow-action {grant}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        } else {
+            "unexpected action authorization grant set".to_owned()
+        };
+        return Err(("action_authorization_mismatch", message));
+    }
+    Ok(())
+}
+
+fn action_authorization_binding(
+    journey: &ValidatedJourney,
+    required: &[String],
+    granted: &[String],
+) -> String {
+    format!(
+        "crawlson-action-grant-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nrequired={}\ngranted={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        required.join(","),
+        granted.join(",")
+    )
+}
+
+fn valid_action_grant(value: &str) -> bool {
+    let Some((journey_id, remainder)) = value.split_once('@') else {
+        return false;
+    };
+    let Some((revision, step_id)) = remainder.split_once(':') else {
+        return false;
+    };
+    valid_action_identifier(journey_id)
+        && valid_action_identifier(step_id)
+        && revision
+            .parse::<u64>()
+            .is_ok_and(|parsed| parsed > 0 && parsed.to_string() == revision)
+}
+
+fn valid_action_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn action_grant(journey: &ValidatedJourney, step_id: &str) -> String {
+    format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step_id)
+}
+
 fn execute(
     journey: &ValidatedJourney,
     run_root: &Path,
@@ -363,7 +545,11 @@ fn execute(
     let mut primary = RunOutcome::Passed;
     let mut primary_reason = Reason {
         code: "journey_passed".to_owned(),
-        message: "all read-only steps and required evidence completed".to_owned(),
+        message: if journey.schema_version >= 3 {
+            "all declared steps, authorized actions, and required evidence completed".to_owned()
+        } else {
+            "all read-only steps and required evidence completed".to_owned()
+        },
     };
 
     match driver.prepare() {
@@ -408,6 +594,9 @@ fn execute(
                             code: "checkpoint_failed".to_owned(),
                             message,
                         };
+                    }
+                    if kind == "follow_link" {
+                        stop = true;
                     }
                     RunOutcome::Failed
                 }
@@ -584,6 +773,183 @@ fn execute_step(
                 StepResult::Failed("visible text did not match the declared checkpoint".to_owned())
             }
         }
+        ValidatedAction::FollowLink {
+            selector,
+            expected_url,
+            alt_text,
+        } => {
+            observation.action_state = Some(ActionState::NotAttempted);
+            observation.action_grant_sha256 = Some(action_step_binding(journey, step_id));
+            observation.expected_url = Some(safe_url(&journey.origin, expected_url));
+
+            let before = driver.current_url()?;
+            observation.before_url = Some(safe_url(&journey.origin, &before));
+            if !journey.origin.contains(&before) {
+                return Ok(StepResult::Blocked(format!(
+                    "link preflight started outside authorized origin {}",
+                    journey.origin
+                )));
+            }
+
+            // Force every inspection and dispatch through an anchor-only CSS
+            // selector. The exact href is added after it is read so a button,
+            // custom element, or link whose href changes cannot satisfy the
+            // click selector used for this action.
+            let anchor_selector = anchor_selector(selector);
+            let visible = driver.visible(&anchor_selector)?;
+            observation.visible = Some(visible);
+            if !visible {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared target was not a visible link".to_owned(),
+                ));
+            }
+            let enabled = driver.enabled(&anchor_selector)?;
+            observation.enabled = Some(enabled);
+            if !enabled {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared link target was not enabled".to_owned(),
+                ));
+            }
+
+            let href = driver.attribute(&anchor_selector, "href")?;
+            let Some(href) = href else {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared link target did not expose an href".to_owned(),
+                ));
+            };
+            if href.len() > 8_192 || href.chars().any(char::is_control) {
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared link href was not a bounded single-line URL".to_owned(),
+                ));
+            }
+            let resolved = match before.join(&href) {
+                Ok(url) => url,
+                Err(_) => {
+                    observation.matched = Some(false);
+                    return Ok(StepResult::Failed(
+                        "declared link href was not a valid URL".to_owned(),
+                    ));
+                }
+            };
+            observation.target_href = Some(safe_url(&journey.origin, &resolved));
+            let dispatch_selector = exact_anchor_selector(selector, &href);
+
+            let stem = format!("{:03}-{}", index + 1, step_id);
+            let raw = run_root.join("evidence").join(format!("{stem}.raw.png"));
+            let capture = driver.capture(&dispatch_selector, &raw)?;
+
+            if !resolved.username().is_empty()
+                || resolved.password().is_some()
+                || resolved.query().is_some()
+                || resolved.fragment().is_some()
+                || !journey.origin.contains(&resolved)
+            {
+                finalize_focused_capture(
+                    run_root,
+                    step_id,
+                    index,
+                    alt_text,
+                    capture,
+                    None,
+                    observation,
+                    artifacts,
+                )?;
+                return Ok(StepResult::Blocked(
+                    "declared link href was outside the authorized exact-origin contract"
+                        .to_owned(),
+                ));
+            }
+            if resolved != *expected_url {
+                finalize_focused_capture(
+                    run_root,
+                    step_id,
+                    index,
+                    alt_text,
+                    capture,
+                    None,
+                    observation,
+                    artifacts,
+                )?;
+                observation.matched = Some(false);
+                return Ok(StepResult::Failed(
+                    "declared link href did not match the expected destination".to_owned(),
+                ));
+            }
+
+            let screenshot_sequence = capture.screenshot_command_sequence;
+            let prior_records = driver.records().len();
+            let click = driver.click(&dispatch_selector);
+            let records = driver.records();
+            let click_sequence = records
+                .last()
+                .filter(|record| records.len() == prior_records + 1 && record.capability == "click")
+                .map(|record| record.sequence)
+                .filter(|sequence| *sequence == screenshot_sequence.saturating_add(1));
+            let Some(click_sequence) = click_sequence else {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                let _ = finalize_focused_capture(
+                    run_root,
+                    step_id,
+                    index,
+                    alt_text,
+                    capture,
+                    None,
+                    observation,
+                    artifacts,
+                );
+                return Err(DriverError::ActionEffectUnknown(
+                    "click dispatch did not produce adjacent command provenance".to_owned(),
+                ));
+            };
+            observation.action_command_sequence = Some(click_sequence);
+            if let Err(error) = finalize_focused_capture(
+                run_root,
+                step_id,
+                index,
+                alt_text,
+                capture,
+                Some(click_sequence),
+                observation,
+                artifacts,
+            ) {
+                observation.action_state = Some(ActionState::EffectUnknown);
+                return Err(DriverError::ActionEffectUnknown(error.to_string()));
+            }
+            match click {
+                Ok(()) => observation.action_state = Some(ActionState::DriverAcknowledged),
+                Err(error @ DriverError::ConfirmationRequired { .. }) => return Err(error),
+                Err(error) => {
+                    observation.action_state = Some(ActionState::EffectUnknown);
+                    return Err(DriverError::ActionEffectUnknown(error.to_string()));
+                }
+            }
+
+            let after = match driver.current_url() {
+                Ok(url) => url,
+                Err(error) => {
+                    observation.action_state = Some(ActionState::EffectUnknown);
+                    return Err(DriverError::ActionEffectUnknown(error.to_string()));
+                }
+            };
+            observation.observed_url = Some(safe_url(&journey.origin, &after));
+            if !journey.origin.contains(&after) {
+                StepResult::Blocked(format!(
+                    "link action reached outside authorized origin {}",
+                    journey.origin
+                ))
+            } else if after == *expected_url {
+                observation.matched = Some(true);
+                observation.action_state = Some(ActionState::EffectVerified);
+                StepResult::Passed
+            } else {
+                observation.matched = Some(false);
+                StepResult::Failed("link action did not reach the declared destination".to_owned())
+            }
+        }
         ValidatedAction::Capture { selector, alt_text } => {
             let visible = driver.visible(selector)?;
             observation.visible = Some(visible);
@@ -602,63 +968,17 @@ fn execute_step(
             }
             let stem = format!("{:03}-{}", index + 1, step_id);
             let raw = run_root.join("evidence").join(format!("{stem}.raw.png"));
-            let focused = run_root
-                .join("evidence")
-                .join(format!("{stem}.focused.png"));
-            let metadata = run_root
-                .join("evidence")
-                .join(format!("{stem}.focused.json"));
             let capture = driver.capture(selector, &raw)?;
-            observation.target_box_css = Some(capture.target);
-            observation.viewport = Some(capture.viewport);
-            observation.capture_token = Some(capture.capture_token.clone());
-            observation.box_command_sequence = Some(capture.box_command_sequence);
-            observation.screenshot_command_sequence = Some(capture.screenshot_command_sequence);
-            let raw = capture.raw_path;
-            let raw_artifact = artifact_record(
+            finalize_focused_capture(
                 run_root,
-                &raw,
-                "raw_screenshot",
-                "image/png",
-                Some(step_id),
-                None,
-            )?;
-            let raw_path = raw_artifact.path.clone();
-            let raw_sha256 = raw_artifact.sha256.clone();
-            observation.artifact_path = Some(raw_path.clone());
-            artifacts.push(raw_artifact);
-            let focus = focus::render(FocusRequest {
-                run_root,
-                raw_path: &raw,
-                focused_path: &focused,
-                metadata_path: &metadata,
-                capture_step_id: step_id,
-                capture_token: &capture.capture_token,
-                box_command_sequence: capture.box_command_sequence,
-                screenshot_command_sequence: capture.screenshot_command_sequence,
+                step_id,
+                index,
                 alt_text,
-                expected_source_sha256: &raw_sha256,
-                target: capture.target,
-                viewport: capture.viewport,
-            })
-            .map_err(|error| DriverError::Artifact(error.to_string()))?;
-            artifacts.push(artifact_record(
-                run_root,
-                &focused,
-                "focused_screenshot",
-                "image/png",
-                Some(step_id),
-                Some(&raw_path),
-            )?);
-            artifacts.push(artifact_record(
-                run_root,
-                &metadata,
-                "focus_metadata",
-                "application/json",
-                Some(step_id),
-                Some(&raw_path),
-            )?);
-            observation.artifact_path = Some(focus.metadata.derivative.path);
+                capture,
+                None,
+                observation,
+                artifacts,
+            )?;
             StepResult::Passed
         }
     };
@@ -674,6 +994,109 @@ fn execute_step(
         }
     }
     Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_focused_capture(
+    run_root: &Path,
+    step_id: &str,
+    index: usize,
+    alt_text: &str,
+    capture: CaptureBundle,
+    action_command_sequence: Option<u32>,
+    observation: &mut StepObservation,
+    artifacts: &mut Vec<ArtifactRecord>,
+) -> Result<(), DriverError> {
+    let stem = format!("{:03}-{}", index + 1, step_id);
+    let focused = run_root
+        .join("evidence")
+        .join(format!("{stem}.focused.png"));
+    let metadata = run_root
+        .join("evidence")
+        .join(format!("{stem}.focused.json"));
+    observation.target_box_css = Some(capture.target);
+    observation.viewport = Some(capture.viewport);
+    observation.box_command_sequence = Some(capture.box_command_sequence);
+    observation.screenshot_command_sequence = Some(capture.screenshot_command_sequence);
+    let capture_token = action_command_sequence.map_or_else(
+        || capture.capture_token.clone(),
+        |sequence| format!("{}:{sequence}", capture.capture_token),
+    );
+    observation.capture_token = Some(capture_token.clone());
+    let raw = capture.raw_path;
+    let raw_artifact = artifact_record(
+        run_root,
+        &raw,
+        "raw_screenshot",
+        "image/png",
+        Some(step_id),
+        None,
+    )?;
+    let raw_path = raw_artifact.path.clone();
+    let raw_sha256 = raw_artifact.sha256.clone();
+    observation.artifact_path = Some(raw_path.clone());
+    artifacts.push(raw_artifact);
+    let focus = focus::render(FocusRequest {
+        run_root,
+        raw_path: &raw,
+        focused_path: &focused,
+        metadata_path: &metadata,
+        capture_step_id: step_id,
+        capture_token: &capture_token,
+        box_command_sequence: capture.box_command_sequence,
+        screenshot_command_sequence: capture.screenshot_command_sequence,
+        alt_text,
+        expected_source_sha256: &raw_sha256,
+        target: capture.target,
+        viewport: capture.viewport,
+    })
+    .map_err(|error| DriverError::Artifact(error.to_string()))?;
+    artifacts.push(artifact_record(
+        run_root,
+        &focused,
+        "focused_screenshot",
+        "image/png",
+        Some(step_id),
+        Some(&raw_path),
+    )?);
+    artifacts.push(artifact_record(
+        run_root,
+        &metadata,
+        "focus_metadata",
+        "application/json",
+        Some(step_id),
+        Some(&raw_path),
+    )?);
+    observation.artifact_path = Some(focus.metadata.derivative.path);
+    Ok(())
+}
+
+fn action_step_binding(journey: &ValidatedJourney, step_id: &str) -> String {
+    let binding = format!(
+        "crawlson-action-step-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nstep={}\ngrant={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        step_id,
+        action_grant(journey, step_id)
+    );
+    hex_digest(binding.as_bytes())
+}
+
+fn anchor_selector(selector: &str) -> String {
+    format!(":is({selector}):is(a[href])")
+}
+
+fn exact_anchor_selector(selector: &str, href: &str) -> String {
+    let mut escaped = String::with_capacity(href.len());
+    for character in href.chars() {
+        if matches!(character, '\\' | '"') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    format!(":is({selector}):is(a[href=\"{escaped}\"])")
 }
 
 enum StepResult {
@@ -781,6 +1204,7 @@ fn base_report(root: &Path, run_id: &str, source_path: String, started_at: u64) 
             revision: None,
         },
         target_origin: None,
+        action_authorization: None,
         started_at_unix_ms: started_at,
         finished_at_unix_ms: started_at,
         duration_ms: 0,
@@ -904,6 +1328,8 @@ fn driver_error_code(error: &DriverError) -> &'static str {
         DriverError::OutputLimit(_) => "driver_output_limit",
         DriverError::CommandFailed { .. } => "driver_command_failed",
         DriverError::NavigationBlocked(_) => "origin_not_authorized",
+        DriverError::ConfirmationRequired { .. } => "driver_confirmation_required",
+        DriverError::ActionEffectUnknown(_) => "action_effect_unknown",
         DriverError::Protocol { .. } => "driver_protocol",
         DriverError::Artifact(_) => "artifact_invalid",
         DriverError::Io(_) => "driver_io",
@@ -925,6 +1351,12 @@ fn safe_driver_message(error: &DriverError) -> String {
         }
         DriverError::NavigationBlocked(_) => {
             "agent-browser blocked navigation outside the authorized target".to_owned()
+        }
+        DriverError::ConfirmationRequired { capability } => format!(
+            "agent-browser command '{capability}' required confirmation and was not executed"
+        ),
+        DriverError::ActionEffectUnknown(_) => {
+            "browser action effect is unknown after dispatch".to_owned()
         }
         DriverError::Protocol { capability, .. } => {
             format!("agent-browser returned an invalid response for '{capability}'")
@@ -959,6 +1391,7 @@ fn action_kind(action: &ValidatedAction) -> &'static str {
         ValidatedAction::Navigate { .. } => "navigate",
         ValidatedAction::CheckUrl { .. } => "check_url",
         ValidatedAction::CheckText { .. } => "check_text",
+        ValidatedAction::FollowLink { .. } => "follow_link",
         ValidatedAction::Capture { .. } => "capture",
     }
 }
@@ -990,7 +1423,8 @@ fn elapsed_ms(timer: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::DiagnosticsSummary;
+    use crate::driver::{CaptureBundle, DiagnosticsSummary};
+    use crate::focus::{CssBox, Viewport};
     use crate::journey::{
         EvidencePolicy, JourneyMeta, JourneyMode, ValidatedAction, ValidatedStep,
     };
@@ -1060,6 +1494,7 @@ mod tests {
 
     fn validated(expected: &str) -> ValidatedJourney {
         ValidatedJourney {
+            schema_version: 1,
             source_path: PathBuf::from("fixture.toml"),
             source_sha256: hex_digest(b"fixture"),
             meta: JourneyMeta {
@@ -1203,5 +1638,131 @@ mod tests {
         assert_eq!(report.execution_outcome, RunOutcome::Blocked);
         assert_eq!(report.reason.code, "origin_not_authorized");
         assert_eq!(report.steps.len(), 1);
+    }
+
+    #[test]
+    fn unknown_click_provenance_still_preserves_pre_action_evidence() {
+        struct MissingClickRecordDriver {
+            url: Url,
+        }
+
+        impl BrowserDriver for MissingClickRecordDriver {
+            fn prepare(&mut self) -> Result<(), DriverError> {
+                Ok(())
+            }
+            fn start_trace(&mut self) -> Result<(), DriverError> {
+                Ok(())
+            }
+            fn navigate(&mut self, url: &Url) -> Result<(), DriverError> {
+                self.url = url.clone();
+                Ok(())
+            }
+            fn current_url(&mut self) -> Result<Url, DriverError> {
+                Ok(self.url.clone())
+            }
+            fn text(&mut self, _selector: &str) -> Result<String, DriverError> {
+                Ok(String::new())
+            }
+            fn visible(&mut self, _selector: &str) -> Result<bool, DriverError> {
+                Ok(true)
+            }
+            fn enabled(&mut self, _selector: &str) -> Result<bool, DriverError> {
+                Ok(true)
+            }
+            fn attribute(
+                &mut self,
+                _selector: &str,
+                _name: &str,
+            ) -> Result<Option<String>, DriverError> {
+                Ok(Some("/complete".to_owned()))
+            }
+            fn click(&mut self, _selector: &str) -> Result<(), DriverError> {
+                self.url = Url::parse("http://127.0.0.1:4173/complete").unwrap();
+                Ok(())
+            }
+            fn capture(
+                &mut self,
+                _selector: &str,
+                path: &Path,
+            ) -> Result<CaptureBundle, DriverError> {
+                let file = fs::File::create(path).unwrap();
+                let mut encoder = png::Encoder::new(file, 1280, 720);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header().unwrap();
+                writer.write_image_data(&vec![255; 1280 * 720 * 4]).unwrap();
+                Ok(CaptureBundle {
+                    raw_path: path.to_path_buf(),
+                    target: CssBox {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 200.0,
+                        height: 50.0,
+                    },
+                    viewport: Viewport {
+                        width_css: 1280.0,
+                        height_css: 720.0,
+                        device_scale_factor: 1.0,
+                        scroll_x_css: Some(0.0),
+                        scroll_y_css: Some(0.0),
+                    },
+                    capture_token: "fixture:1:2".to_owned(),
+                    box_command_sequence: 1,
+                    screenshot_command_sequence: 2,
+                })
+            }
+            fn diagnostics(&mut self) -> Result<DiagnosticsSummary, DriverError> {
+                unreachable!()
+            }
+            fn stop_trace(&mut self, _path: &Path) -> Result<PathBuf, DriverError> {
+                unreachable!()
+            }
+            fn close(&mut self) -> Result<(), DriverError> {
+                Ok(())
+            }
+            fn records(&self) -> Vec<DriverCommandRecord> {
+                Vec::new()
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("evidence")).unwrap();
+        let mut journey = validated("Hello");
+        journey.schema_version = 3;
+        let action = ValidatedAction::FollowLink {
+            selector: "#continue".to_owned(),
+            expected_url: Url::parse("http://127.0.0.1:4173/complete").unwrap(),
+            alt_text: "Continue highlighted in red".to_owned(),
+        };
+        let mut driver = MissingClickRecordDriver {
+            url: Url::parse("http://127.0.0.1:4173/").unwrap(),
+        };
+        let mut observation = StepObservation::default();
+        let mut artifacts = Vec::new();
+        let error = match execute_step(
+            &journey,
+            directory.path(),
+            &mut driver,
+            "continue",
+            0,
+            &action,
+            true,
+            &mut observation,
+            &mut artifacts,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing click provenance must not produce a step result"),
+        };
+
+        assert!(matches!(error, DriverError::ActionEffectUnknown(_)));
+        assert_eq!(observation.action_state, Some(ActionState::EffectUnknown));
+        assert!(observation.action_command_sequence.is_none());
+        assert_eq!(
+            artifacts
+                .iter()
+                .map(|artifact| artifact.kind)
+                .collect::<Vec<_>>(),
+            vec!["raw_screenshot", "focused_screenshot", "focus_metadata"]
+        );
     }
 }

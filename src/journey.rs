@@ -96,6 +96,11 @@ pub enum StepAction {
         selector: String,
         alt_text: String,
     },
+    FollowLink {
+        selector: String,
+        expected_path: String,
+        alt_text: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -115,6 +120,7 @@ pub struct LoadedJourney {
 
 #[derive(Debug, Clone)]
 pub struct ValidatedJourney {
+    pub schema_version: u8,
     pub source_path: PathBuf,
     pub source_sha256: String,
     pub meta: JourneyMeta,
@@ -148,6 +154,11 @@ pub enum ValidatedAction {
     },
     Capture {
         selector: String,
+        alt_text: String,
+    },
+    FollowLink {
+        selector: String,
+        expected_url: Url,
         alt_text: String,
     },
 }
@@ -285,9 +296,9 @@ pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
 pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError> {
     let document = loaded.document;
     let schema_version = document.schema_version;
-    if !matches!(schema_version, 1 | 2) {
+    if !matches!(schema_version, 1..=3) {
         return Err(JourneyError::Validation(format!(
-            "unsupported schema_version {schema_version}; expected 1 or 2"
+            "unsupported schema_version {schema_version}; expected 1, 2, or 3"
         )));
     }
     validate_id("journey", &document.journey.id)?;
@@ -325,7 +336,7 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
     let mut identifiers = HashSet::new();
     let mut steps = Vec::with_capacity(document.steps.len());
     let mut has_checkpoint = false;
-    let mut has_capture = false;
+    let mut has_guide_evidence = false;
     let mut prior_checkpoints = HashSet::new();
     for step in document.steps {
         validate_id("step", &step.id)?;
@@ -343,7 +354,7 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
                     step.id
                 )));
             }
-            if schema_version == 2
+            if schema_version >= 2
                 && (instruction.len() > MAX_GUIDE_INSTRUCTION_BYTES
                     || has_disallowed_control(instruction))
             {
@@ -403,19 +414,36 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
             }
             StepAction::Capture { selector, alt_text } => {
                 validate_selector(&selector)?;
-                validate_nonempty("capture alt_text", &alt_text)?;
-                if alt_text.len() > MAX_ALT_TEXT_BYTES
-                    || alt_text.chars().any(|character| {
-                        character.is_control() && !matches!(character, '\n' | '\r' | '\t')
-                    })
-                {
+                validate_alt_text(&step.id, "capture", &alt_text)?;
+                has_guide_evidence = true;
+                ValidatedAction::Capture { selector, alt_text }
+            }
+            StepAction::FollowLink {
+                selector,
+                expected_path,
+                alt_text,
+            } => {
+                if schema_version < 3 {
                     return Err(JourneyError::Validation(format!(
-                        "step '{}' capture alt_text must contain at most {MAX_ALT_TEXT_BYTES} bytes and no control characters",
+                        "step '{}' follow_link requires journey schema version 3",
                         step.id
                     )));
                 }
-                has_capture = true;
-                ValidatedAction::Capture { selector, alt_text }
+                if step.guide_instruction.is_none() {
+                    return Err(JourneyError::Validation(format!(
+                        "step '{}' follow_link requires guide_instruction",
+                        step.id
+                    )));
+                }
+                validate_selector(&selector)?;
+                validate_alt_text(&step.id, "follow_link", &alt_text)?;
+                let expected_url = validate_path(&origin, &base, &expected_path, schema_version)?;
+                has_guide_evidence = true;
+                ValidatedAction::FollowLink {
+                    selector,
+                    expected_url,
+                    alt_text,
+                }
             }
         };
         if !step.evidence_for.is_empty() && !matches!(action, ValidatedAction::Capture { .. }) {
@@ -432,14 +460,17 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
             action,
         });
     }
-    if !has_checkpoint || !has_capture {
-        return Err(JourneyError::Validation(
+    if !has_checkpoint || !has_guide_evidence {
+        let message = if schema_version < 3 {
             "a journey requires at least one deterministic checkpoint and one focused capture"
-                .to_owned(),
-        ));
+        } else {
+            "a journey requires at least one deterministic checkpoint and one focused evidence action"
+        };
+        return Err(JourneyError::Validation(message.to_owned()));
     }
 
     Ok(ValidatedJourney {
+        schema_version,
         source_path: loaded.source_path,
         source_sha256: loaded.source_sha256,
         meta: document.journey,
@@ -473,10 +504,10 @@ fn validate_path(
             "step path resolves outside the authorized origin".to_owned(),
         ));
     }
-    if schema_version == 2 && (url.query().is_some() || url.fragment().is_some()) {
-        return Err(JourneyError::Validation(
-            "journey v2 step paths must not contain a query or fragment".to_owned(),
-        ));
+    if schema_version >= 2 && (url.query().is_some() || url.fragment().is_some()) {
+        return Err(JourneyError::Validation(format!(
+            "journey v{schema_version} step paths must not contain a query or fragment"
+        )));
     }
     Ok(url)
 }
@@ -510,6 +541,16 @@ fn validate_selector(value: &str) -> Result<(), JourneyError> {
     if value.trim().is_empty() || value.len() > MAX_SELECTOR_BYTES || value.contains('\0') {
         return Err(JourneyError::Validation(format!(
             "selector must contain 1 to {MAX_SELECTOR_BYTES} bytes and no NUL"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_alt_text(step_id: &str, action: &str, value: &str) -> Result<(), JourneyError> {
+    validate_nonempty(&format!("{action} alt_text"), value)?;
+    if value.len() > MAX_ALT_TEXT_BYTES || has_disallowed_control(value) {
+        return Err(JourneyError::Validation(format!(
+            "step '{step_id}' {action} alt_text must contain at most {MAX_ALT_TEXT_BYTES} bytes and no control characters"
         )));
     }
     Ok(())
@@ -573,9 +614,24 @@ action = { type = "capture", selector = "h1", alt_text = "Highlighted heading" }
         }
     }
 
+    fn valid_follow_link_document() -> LoadedJourney {
+        let mut loaded = valid_document();
+        loaded.document.schema_version = 3;
+        loaded.document.steps[2].title = "Follow the Continue link".to_owned();
+        loaded.document.steps[2].guide_instruction =
+            Some("Select the highlighted Continue link.".to_owned());
+        loaded.document.steps[2].action = StepAction::FollowLink {
+            selector: "#continue".to_owned(),
+            expected_path: "/complete".to_owned(),
+            alt_text: "Continue link highlighted in red".to_owned(),
+        };
+        loaded
+    }
+
     #[test]
     fn validates_and_resolves_read_only_steps() {
         let journey = validate(valid_document()).unwrap();
+        assert_eq!(journey.schema_version, 1);
         assert_eq!(journey.origin.to_string(), "http://127.0.0.1:4173");
         assert!(matches!(
             &journey.steps[0].action,
@@ -703,5 +759,161 @@ action = { type = "navigate", path = "/", unexpected = true }
             path: "/?view=current".to_owned(),
         };
         assert!(validate(current).is_err());
+    }
+
+    #[test]
+    fn v3_resolves_follow_link_and_treats_it_as_focused_guide_evidence() {
+        let journey = validate(valid_follow_link_document()).unwrap();
+        assert_eq!(journey.schema_version, 3);
+        assert!(matches!(
+            &journey.steps[2].action,
+            ValidatedAction::FollowLink {
+                selector,
+                expected_url,
+                alt_text,
+            } if selector == "#continue"
+                && expected_url.as_str() == "http://127.0.0.1:4173/complete"
+                && alt_text == "Continue link highlighted in red"
+        ));
+
+        let mut capture_only = valid_document();
+        capture_only.document.schema_version = 3;
+        assert!(validate(capture_only).is_ok());
+    }
+
+    #[test]
+    fn follow_link_requires_v3_instruction_and_a_separate_checkpoint() {
+        for schema_version in [1, 2] {
+            let mut legacy = valid_follow_link_document();
+            legacy.document.schema_version = schema_version;
+            assert!(validate(legacy).is_err(), "schema v{schema_version}");
+        }
+
+        let mut missing_instruction = valid_follow_link_document();
+        missing_instruction.document.steps[2].guide_instruction = None;
+        assert!(validate(missing_instruction).is_err());
+
+        let mut empty_instruction = valid_follow_link_document();
+        empty_instruction.document.steps[2].guide_instruction = Some(" \t".to_owned());
+        assert!(validate(empty_instruction).is_err());
+
+        for guide_instruction in [
+            "x".repeat(MAX_GUIDE_INSTRUCTION_BYTES + 1),
+            "Select\0 Continue".to_owned(),
+        ] {
+            let mut invalid_instruction = valid_follow_link_document();
+            invalid_instruction.document.steps[2].guide_instruction = Some(guide_instruction);
+            assert!(validate(invalid_instruction).is_err());
+        }
+
+        let mut no_checkpoint = valid_follow_link_document();
+        no_checkpoint.document.steps.remove(1);
+        assert!(validate(no_checkpoint).is_err());
+    }
+
+    #[test]
+    fn follow_link_rejects_unsafe_paths_selectors_alt_text_and_evidence_links() {
+        for expected_path in [
+            "https://example.com/complete",
+            "//example.com/complete",
+            "/complete?token=secret",
+            "/complete#fragment",
+            r"/complete\backslash",
+        ] {
+            let mut loaded = valid_follow_link_document();
+            loaded.document.steps[2].action = StepAction::FollowLink {
+                selector: "#continue".to_owned(),
+                expected_path: expected_path.to_owned(),
+                alt_text: "Continue link".to_owned(),
+            };
+            assert!(validate(loaded).is_err(), "{expected_path}");
+        }
+
+        for selector in [
+            String::new(),
+            "x".repeat(MAX_SELECTOR_BYTES + 1),
+            "#bad\0".to_owned(),
+        ] {
+            let mut loaded = valid_follow_link_document();
+            loaded.document.steps[2].action = StepAction::FollowLink {
+                selector,
+                expected_path: "/complete".to_owned(),
+                alt_text: "Continue link".to_owned(),
+            };
+            assert!(validate(loaded).is_err());
+        }
+
+        for alt_text in [
+            String::new(),
+            "x".repeat(MAX_ALT_TEXT_BYTES + 1),
+            "bad\u{0}alt".to_owned(),
+        ] {
+            let mut loaded = valid_follow_link_document();
+            loaded.document.steps[2].action = StepAction::FollowLink {
+                selector: "#continue".to_owned(),
+                expected_path: "/complete".to_owned(),
+                alt_text,
+            };
+            assert!(validate(loaded).is_err());
+        }
+
+        let mut associated = valid_follow_link_document();
+        associated.document.steps[2].evidence_for = vec!["heading".to_owned()];
+        assert!(validate(associated).is_err());
+    }
+
+    #[test]
+    fn published_v3_schema_accepts_follow_link_and_rejects_missing_instruction() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../schemas/journey-v3.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let mut document = serde_json::json!({
+            "schema_version": 3,
+            "journey": {
+                "id": "demo.follow-link",
+                "revision": 1,
+                "title": "Follow a link",
+                "purpose": "Exercise one visible link",
+                "expected_outcome": "The destination is visible",
+                "mode": "read_only"
+            },
+            "target": { "origin": "http://127.0.0.1:4173" },
+            "evidence": { "trace": true, "diagnostics": true },
+            "steps": [
+                {
+                    "id": "open",
+                    "title": "Open home",
+                    "action": { "type": "navigate", "path": "/" }
+                },
+                {
+                    "id": "heading",
+                    "title": "Check heading",
+                    "action": {
+                        "type": "check_text",
+                        "selector": "h1",
+                        "expected": "Hello",
+                        "comparison": "exact"
+                    }
+                },
+                {
+                    "id": "continue",
+                    "title": "Follow Continue",
+                    "guide_instruction": "Select Continue.",
+                    "action": {
+                        "type": "follow_link",
+                        "selector": "#continue",
+                        "expected_path": "/complete",
+                        "alt_text": "Continue highlighted in red"
+                    }
+                }
+            ]
+        });
+        assert!(validator.is_valid(&document));
+
+        document["steps"][2]
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_instruction");
+        assert!(!validator.is_valid(&document));
     }
 }

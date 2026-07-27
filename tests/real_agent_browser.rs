@@ -43,6 +43,7 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
         &directory.path().join("pass-runs"),
         agent_browser.as_os_str(),
         Some(&demo.origin),
+        None,
     );
     assert_exit(&pass, 0, "passing real-browser journey");
     let pass_report = json_stdout(&pass, "passing real-browser journey");
@@ -75,6 +76,7 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
         &directory.path().join("fail-runs"),
         agent_browser.as_os_str(),
         Some(&demo.origin),
+        None,
     );
     assert_exit(&failed, 1, "failing real-browser journey");
     let failed_report = json_stdout(&failed, "failing real-browser journey");
@@ -103,6 +105,7 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
         &directory.path().join("blocked-runs"),
         agent_browser.as_os_str(),
         None,
+        None,
     );
     assert_exit(&blocked, 3, "blocked real-browser journey");
     let blocked_report = json_stdout(&blocked, "blocked real-browser journey");
@@ -123,6 +126,124 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
             .as_array()
             .is_some_and(Vec::is_empty),
         "a preflight block must not invent browser evidence"
+    );
+
+    let action_pass_journey =
+        copy_demo_journey(directory.path(), "follow-link-pass.toml", &demo.origin);
+    let action_fail_journey =
+        copy_demo_journey(directory.path(), "follow-link-fail.toml", &demo.origin);
+    let action_pass = run_journey(
+        &action_pass_journey,
+        &directory.path().join("action-pass-runs"),
+        agent_browser.as_os_str(),
+        Some(&demo.origin),
+        Some("demo.follow-link-pass@1:follow-continue"),
+    );
+    assert_exit(&action_pass, 0, "authorized real-browser link journey");
+    let action_pass_report = json_stdout(&action_pass, "authorized real-browser link journey");
+    assert_eq!(action_pass_report["schema_version"], 2);
+    assert_eq!(action_pass_report["outcome"], "passed");
+    let action_step = action_pass_report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "follow-continue")
+        .expect("follow-link step was reported");
+    assert_eq!(
+        action_step["observation"]["action_state"],
+        "effect_verified"
+    );
+    assert_eq!(
+        action_step["observation"]["observed_url"],
+        format!("{}/complete", demo.origin)
+    );
+    assert_eq!(
+        action_pass_report["driver"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["capability"] == "click")
+            .count(),
+        1
+    );
+    let action_pass_root = run_root(&action_pass_report);
+    let action_evidence = verify_evidence(&action_pass_root, &action_pass_report);
+    verify_focus_pixels(&action_evidence);
+    let action_render = render_journey(&action_pass_root, &action_pass_journey);
+    assert_exit(&action_render, 0, "authorized link guide render");
+    let action_guide = fs::read_to_string(action_pass_root.join("render/guide.md"))
+        .expect("read authorized-link guide");
+    assert!(action_guide.contains("executed this highlighted link action once"));
+    assert!(action_guide.contains("verified its exact declared same-origin destination"));
+
+    let action_failed = run_journey(
+        &action_fail_journey,
+        &directory.path().join("action-fail-runs"),
+        agent_browser.as_os_str(),
+        Some(&demo.origin),
+        Some("demo.follow-link-fail@1:follow-broken-redirect"),
+    );
+    assert_exit(&action_failed, 1, "post-action mismatch journey");
+    let action_failed_report = json_stdout(&action_failed, "post-action mismatch journey");
+    assert_eq!(action_failed_report["outcome"], "failed");
+    let action_failed_step = action_failed_report["steps"]
+        .as_array()
+        .unwrap()
+        .last()
+        .expect("failed action step was reported");
+    assert_eq!(action_failed_step["id"], "follow-broken-redirect");
+    assert_eq!(
+        action_failed_step["observation"]["action_state"],
+        "driver_acknowledged"
+    );
+    assert_eq!(
+        action_failed_step["observation"]["observed_url"],
+        format!("{}/unexpected", demo.origin)
+    );
+    let action_failed_root = run_root(&action_failed_report);
+    let action_failed_evidence = verify_evidence(&action_failed_root, &action_failed_report);
+    verify_focus_pixels(&action_failed_evidence);
+    let action_failed_render = render_journey(&action_failed_root, &action_fail_journey);
+    assert_exit(&action_failed_render, 1, "post-action finding render");
+    assert_eq!(
+        json_stdout(&action_failed_render, "post-action finding render")["status"],
+        "findings_ready"
+    );
+    let findings = fs::read_to_string(action_failed_root.join("render/findings.md"))
+        .expect("read post-action findings");
+    assert!(findings.contains("Kind: `link_postcondition_mismatch`"));
+    assert!(findings.contains("Observed: path /unexpected"));
+    let findings: Value = serde_json::from_slice(
+        &fs::read(action_failed_root.join("render/findings.json"))
+            .expect("read post-action findings JSON"),
+    )
+    .expect("parse post-action findings JSON");
+    let evidence = findings["findings"][0]["evidence"]
+        .as_array()
+        .expect("post-action finding evidence");
+    assert!(evidence.iter().any(|item| {
+        item["kind"] == "focused_screenshot"
+            && item["capture_step_id"] == "follow-broken-redirect"
+            && item["association_source"] == "action.preflight"
+    }));
+
+    let action_blocked = run_journey(
+        &action_pass_journey,
+        &directory.path().join("action-blocked-runs"),
+        agent_browser.as_os_str(),
+        Some(&demo.origin),
+        None,
+    );
+    assert_exit(&action_blocked, 3, "missing link-action authorization");
+    let action_blocked_report = json_stdout(&action_blocked, "missing link-action authorization");
+    assert_eq!(
+        action_blocked_report["reason"]["code"],
+        "action_authorization_mismatch"
+    );
+    assert!(
+        action_blocked_report["driver"]["commands"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
     );
 
     demo.shutdown();
@@ -379,6 +500,7 @@ fn run_journey(
     output_directory: &Path,
     agent_browser: &OsStr,
     allowed_origin: Option<&str>,
+    allowed_action: Option<&str>,
 ) -> Output {
     let mut command = Command::new(crawlson_executable());
     command
@@ -390,6 +512,9 @@ fn run_journey(
         .arg(agent_browser);
     if let Some(origin) = allowed_origin {
         command.arg("--allow-origin").arg(origin);
+    }
+    if let Some(action) = allowed_action {
+        command.arg("--allow-action").arg(action);
     }
     command_output(command, "crawlson run")
 }

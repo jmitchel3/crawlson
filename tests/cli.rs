@@ -194,6 +194,400 @@ fn authenticated_journey_is_explicitly_blocked_before_driver_launch() {
 }
 
 #[test]
+fn follow_link_requires_the_exact_step_grant_before_driver_launch() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_follow_link_journey(directory.path(), "/complete");
+
+    for grants in [
+        Vec::<&str>::new(),
+        vec!["--allow-action", "fixture.follow-link@1:other"],
+    ] {
+        let mut extra = vec!["--allow-origin", "http://127.0.0.1:4173"];
+        extra.extend(grants);
+        let output = run_command("crawlson", &journey, directory.path(), &fixture, &extra);
+        assert_eq!(output.status.code(), Some(3));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        validate_schema(
+            include_str!("../schemas/run-report-v2.schema.json"),
+            &report,
+        );
+        assert_eq!(report["schema_version"], 2);
+        assert_eq!(report["outcome"], "blocked");
+        assert_eq!(report["reason"]["code"], "action_authorization_mismatch");
+        assert!(report["driver"]["commands"].as_array().unwrap().is_empty());
+        assert!(report["artifacts"].as_array().unwrap().is_empty());
+    }
+    assert!(!fixture.call_log().exists());
+}
+
+#[test]
+fn action_authorization_provenance_keeps_preflight_reports_renderable_and_versioned() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_follow_link_journey(directory.path(), "/complete");
+    let output = run_command("crawlson", &journey, directory.path(), &fixture, &[]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    validate_schema(
+        include_str!("../schemas/run-report-v2.schema.json"),
+        &report,
+    );
+    assert_eq!(report["reason"]["code"], "target_authorization_missing");
+    assert_eq!(
+        report["action_authorization"]["required"],
+        serde_json::json!(["fixture.follow-link@1:follow-continue"])
+    );
+    assert!(
+        report["action_authorization"]["granted"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let root = PathBuf::from(report["run_directory"].as_str().unwrap());
+    let rendered = render_command("crawlson", &root, &journey);
+    assert_eq!(rendered.status.code(), Some(3));
+    let rendered: Value = serde_json::from_slice(&rendered.stdout).unwrap();
+    assert_eq!(rendered["status"], "not_publishable");
+
+    let read_only = write_journey(directory.path(), "Hello", false);
+    let output = run_command(
+        "crawlson",
+        &read_only,
+        directory.path(),
+        &fixture,
+        &[
+            "--allow-origin",
+            "http://127.0.0.1:4173",
+            "--allow-action",
+            "fixture.read-only@1:unexpected",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    validate_schema(
+        include_str!("../schemas/run-report-v1.schema.json"),
+        &report,
+    );
+    assert_eq!(report["reason"]["code"], "action_authorization_unexpected");
+    assert!(report.get("action_authorization").is_none());
+
+    let action = write_follow_link_journey(directory.path(), "/complete");
+    let output = run_command(
+        "crawlson",
+        &action,
+        directory.path(),
+        &fixture,
+        &[
+            "--allow-origin",
+            "http://127.0.0.1:4173",
+            "--allow-action",
+            "secret malformed grant",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret malformed grant"));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    validate_schema(
+        include_str!("../schemas/run-report-v2.schema.json"),
+        &report,
+    );
+    assert_eq!(report["reason"]["code"], "action_authorization_invalid");
+    assert!(
+        report["action_authorization"]["granted"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!fixture.call_log().exists());
+
+    let fixture = FakeAgentBrowser::compile();
+    let capture_only = write_journey(directory.path(), "Hello", false);
+    let source = fs::read_to_string(&capture_only)
+        .unwrap()
+        .replace("schema_version = 2", "schema_version = 3");
+    fs::write(&capture_only, source).unwrap();
+    let output = run_command(
+        "crawlson",
+        &capture_only,
+        directory.path(),
+        &fixture,
+        &["--allow-origin", "http://127.0.0.1:4173"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    validate_schema(
+        include_str!("../schemas/run-report-v2.schema.json"),
+        &report,
+    );
+    assert!(
+        report["action_authorization"]["required"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        report["action_authorization"]["granted"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let root = PathBuf::from(report["run_directory"].as_str().unwrap());
+    let rendered = render_command("crawlson", &root, &capture_only);
+    assert_eq!(rendered.status.code(), Some(0));
+}
+
+#[test]
+fn follow_link_executes_once_and_renders_only_verified_action_evidence() {
+    for name in ["crawlson", "clson"] {
+        let fixture = FakeAgentBrowser::compile();
+        let directory = tempfile::tempdir().unwrap();
+        let journey = write_follow_link_journey(directory.path(), "/complete");
+        let output = run_command(
+            name,
+            &journey,
+            directory.path(),
+            &fixture,
+            &[
+                "--allow-origin",
+                "http://127.0.0.1:4173",
+                "--allow-action",
+                "fixture.follow-link@1:follow-continue",
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        validate_schema(
+            include_str!("../schemas/run-report-v2.schema.json"),
+            &report,
+        );
+        assert_eq!(report["schema_version"], 2);
+        assert_eq!(report["outcome"], "passed");
+        let action = report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "follow-continue")
+            .unwrap();
+        assert_eq!(action["kind"], "follow_link");
+        assert_eq!(action["status"], "passed");
+        assert_eq!(action["observation"]["action_state"], "effect_verified");
+        assert_eq!(
+            action["observation"]["target_href"],
+            "http://127.0.0.1:4173/complete"
+        );
+        assert!(
+            action["observation"]["action_command_sequence"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            report["action_authorization"]["required"],
+            serde_json::json!(["fixture.follow-link@1:follow-continue"])
+        );
+        let calls = fs::read_to_string(fixture.call_log()).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.contains("\tclick\t"))
+                .count(),
+            1
+        );
+        assert!(calls.contains(":is(#action-button):is(a[href=\"/complete\"])"));
+        assert!(!calls.contains("\tclick\t#action-button\t"));
+
+        let run_root = PathBuf::from(report["run_directory"].as_str().unwrap());
+        let render = render_command(name, &run_root, &journey);
+        assert_eq!(
+            render.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&render.stdout)
+        );
+        let rendered: Value = serde_json::from_slice(&render.stdout).unwrap();
+        assert_eq!(rendered["status"], "guide_ready");
+        let guide = fs::read_to_string(run_root.join("render/guide.md")).unwrap();
+        assert!(guide.contains("executed this highlighted link action once"));
+        assert!(guide.contains("verified its exact declared same-origin destination"));
+    }
+}
+
+#[test]
+fn follow_link_failures_and_unknown_effects_are_honest() {
+    for (scenario, extra_timeout, exit, outcome, code, action_state) in [
+        (
+            "hidden_link",
+            false,
+            1,
+            "failed",
+            "checkpoint_failed",
+            "not_attempted",
+        ),
+        (
+            "disabled",
+            false,
+            1,
+            "failed",
+            "checkpoint_failed",
+            "not_attempted",
+        ),
+        (
+            "href_missing",
+            false,
+            1,
+            "failed",
+            "checkpoint_failed",
+            "not_attempted",
+        ),
+        (
+            "href_mismatch",
+            false,
+            1,
+            "failed",
+            "checkpoint_failed",
+            "not_attempted",
+        ),
+        (
+            "href_off_origin",
+            false,
+            3,
+            "blocked",
+            "origin_not_authorized",
+            "not_attempted",
+        ),
+        (
+            "click_confirmation",
+            false,
+            4,
+            "error",
+            "driver_confirmation_required",
+            "not_attempted",
+        ),
+        (
+            "click_error",
+            false,
+            4,
+            "error",
+            "action_effect_unknown",
+            "effect_unknown",
+        ),
+        (
+            "click_response_mismatch",
+            false,
+            4,
+            "error",
+            "action_effect_unknown",
+            "effect_unknown",
+        ),
+        (
+            "click_unknown",
+            false,
+            4,
+            "error",
+            "action_effect_unknown",
+            "effect_unknown",
+        ),
+        (
+            "click_timeout",
+            true,
+            4,
+            "error",
+            "action_effect_unknown",
+            "effect_unknown",
+        ),
+        (
+            "click_post_origin_escape",
+            false,
+            3,
+            "blocked",
+            "origin_not_authorized",
+            "driver_acknowledged",
+        ),
+        (
+            "click_wrong_destination",
+            false,
+            1,
+            "failed",
+            "checkpoint_failed",
+            "driver_acknowledged",
+        ),
+    ] {
+        let fixture = FakeAgentBrowser::compile();
+        fixture.set_scenario(scenario);
+        let directory = tempfile::tempdir().unwrap();
+        let journey = write_follow_link_journey(directory.path(), "/complete");
+        let mut extra = vec![
+            "--allow-origin",
+            "http://127.0.0.1:4173",
+            "--allow-action",
+            "fixture.follow-link@1:follow-continue",
+        ];
+        if extra_timeout {
+            extra.extend(["--action-timeout-seconds", "1"]);
+        }
+        let output = run_command("crawlson", &journey, directory.path(), &fixture, &extra);
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{scenario}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["outcome"], outcome, "{scenario}");
+        assert_eq!(report["reason"]["code"], code, "{scenario}");
+        let action = report["steps"].as_array().unwrap().last().unwrap();
+        assert_eq!(action["id"], "follow-continue", "{scenario}");
+        assert_eq!(
+            action["observation"]["action_state"], action_state,
+            "{scenario}"
+        );
+        assert_eq!(report["cleanup"]["status"], "passed", "{scenario}");
+
+        if outcome == "failed" {
+            let root = PathBuf::from(report["run_directory"].as_str().unwrap());
+            let rendered = render_command("crawlson", &root, &journey);
+            assert_eq!(
+                rendered.status.code(),
+                Some(1),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&rendered.stdout)
+            );
+            let rendered: Value = serde_json::from_slice(&rendered.stdout).unwrap();
+            assert_eq!(rendered["status"], "findings_ready", "{scenario}");
+            let findings: Value =
+                serde_json::from_slice(&fs::read(root.join("render/findings.json")).unwrap())
+                    .unwrap();
+            validate_schema(
+                include_str!("../schemas/findings-v2.schema.json"),
+                &findings,
+            );
+            let finding = &findings["findings"][0];
+            let expected_kind = match scenario {
+                "hidden_link" => "link_not_visible",
+                "disabled" => "link_not_enabled",
+                "href_missing" => "link_target_invalid",
+                "href_mismatch" => "link_destination_mismatch",
+                "click_wrong_destination" => "link_postcondition_mismatch",
+                _ => unreachable!(),
+            };
+            assert_eq!(finding["kind"], expected_kind, "{scenario}");
+            if scenario == "click_wrong_destination" {
+                assert_eq!(finding["checkpoint"]["expected"], "/complete");
+                assert_eq!(finding["checkpoint"]["observed_path"], "/unexpected");
+                assert_eq!(finding["checkpoint"]["action_state"], "driver_acknowledged");
+            }
+        }
+    }
+}
+
+#[test]
 fn fake_process_runner_reports_pass_failure_and_redirect_honestly() {
     for (scenario, expected_text, exit, outcome, code) in [
         ("pass", "Hello", 0, "passed", "journey_passed"),
@@ -279,7 +673,11 @@ fn fake_process_runner_maps_protocol_limits_timeout_and_cleanup_to_error() {
         ("failure_without_error", vec![], "driver_protocol"),
         ("exit_success_envelope_failure", vec![], "driver_protocol"),
         ("exit_failure_envelope_success", vec![], "driver_protocol"),
-        ("confirmation_required", vec![], "driver_protocol"),
+        (
+            "confirmation_required",
+            vec![],
+            "driver_confirmation_required",
+        ),
         ("success_missing_data", vec![], "driver_protocol"),
         ("invalid_box", vec![], "driver_protocol"),
         (
@@ -1244,7 +1642,7 @@ fn write_journey(directory: &Path, expected: &str, authenticated: bool) -> PathB
         ""
     };
     let source = format!(
-        r#"
+        r##"
 schema_version = 2
 
 [journey]
@@ -1278,9 +1676,61 @@ title = "Capture the heading"
 guide_instruction = "Review the highlighted heading."
 evidence_for = ["heading"]
 action = {{ type = "capture", selector = "h1", alt_text = "Highlighted heading" }}
-"#
+"##
     );
     let path = directory.join("journey.toml");
+    fs::write(&path, source).unwrap();
+    path
+}
+
+fn write_follow_link_journey(directory: &Path, expected_path: &str) -> PathBuf {
+    let source = format!(
+        r##"
+schema_version = 3
+
+[journey]
+id = "fixture.follow-link"
+revision = 1
+title = "Follow Continue"
+purpose = "Verify a visitor can activate the visible Continue link."
+expected_outcome = "The completion page is visible."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open"
+title = "Open the fixture"
+action = {{ type = "navigate", path = "/" }}
+
+[[steps]]
+id = "home-heading"
+title = "Check the home heading"
+action = {{ type = "check_text", selector = "h1", expected = "Hello", comparison = "exact" }}
+
+[[steps]]
+id = "follow-continue"
+title = "Follow Continue"
+guide_instruction = "Select the highlighted Continue link."
+action = {{ type = "follow_link", selector = "#action-button", expected_path = "{expected_path}", alt_text = "Continue link highlighted in red" }}
+
+[[steps]]
+id = "completion-location"
+title = "Check the completion location"
+action = {{ type = "check_url", path = "/complete" }}
+
+[[steps]]
+id = "completion-heading"
+title = "Check the completion heading"
+action = {{ type = "check_text", selector = "#completion-heading", expected = "Complete", comparison = "exact" }}
+"##
+    );
+    let path = directory.join("follow-link.toml");
     fs::write(&path, source).unwrap();
     path
 }

@@ -9,7 +9,7 @@ journeys as guides.
 
 Build the smallest end-to-end run before designing a broad platform.
 
-A user should be able to define one read-only journey, run it against an
+A user should be able to define one deterministic journey, run it against an
 explicitly allowlisted local or staging target, and receive:
 
 - an unambiguous result (`passed`, `failed`, `blocked`, or `error`);
@@ -54,14 +54,16 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [x] Define the 0.5.1 four-target bundle, signed release inventory, raw-payload
+- [x] Define the 0.6.0 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
 - [x] Prove a clean managed install and packaged demo-application HTTP startup
       from every 0.5.1 dry-run bundle without using a production key or
       publishing a release.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
-- [ ] Publish signed, immutable 0.5.1 bundles and raw update payloads after the
+- [ ] Re-prove the clean managed install and complete packaged action demo from
+      every 0.6.0 dry-run bundle.
+- [ ] Publish signed, immutable 0.6.0 bundles and raw update payloads after the
       license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts
@@ -71,6 +73,7 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
   - [x] target and exact authorized origin;
   - [x] user role and authentication requirements without embedding secrets;
   - [x] ordered read-only actions and observable checkpoints;
+  - [x] one explicitly authorized, deterministic same-origin link action;
   - [ ] whether each step is read-only or mutating;
   - [ ] fixture setup and cleanup requirements;
   - [x] evidence to retain; and
@@ -93,6 +96,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       redirect, while documenting the hostname-only driver limitation.
 - [x] Make every v1 run read-only with no generic click, input, script, or
       mutation capability.
+- [x] Add a v3 `follow_link` capability with an exact per-step runtime grant,
+      pre-action focused evidence, one non-retried click, and exact same-origin
+      postcondition verification.
 - [ ] Require an explicit mutation capability for journeys that change data.
 - [ ] Refuse mutating production runs unless the exact target and operation were
       explicitly authorized.
@@ -165,6 +171,8 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       fail, blocked, error, mutation denial, and cleanup failure.
   - [x] Cover the read-only pass/fail/blocked/error and cleanup contracts with a
         fake process and a required-in-CI real agent-browser loopback fixture.
+  - [x] Cover authorized link pass, preflight mismatch, missing grant,
+        off-origin block, and uncertain post-dispatch action state.
   - [ ] Add mutation-denial coverage when a mutation contract exists.
 - [x] Prove that a clean source build can run the demo and reproduce the
       documented artifacts.
@@ -181,7 +189,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] A process-level, typed-capability `agent-browser` adapter for the MVP;
       consider a broader driver protocol only when a second driver requires it
 - [x] Strict declarative TOML v1 with a published JSON Schema
-- [ ] How agents propose actions without bypassing deterministic safety checks
+- [x] Require validated declarative actions plus exact runtime grants before
+      exposing the minimum driver capability; agent-proposed actions remain a
+      later contract.
 - [ ] Local model, hosted model, and model-provider abstraction boundaries
 - [ ] Baseline/diff strategy for UI changes and nondeterministic content
 - [ ] Artifact storage and redaction policy

@@ -13,7 +13,7 @@ fn main() {
     let fixture = fixture_directory();
     log_arguments(&fixture, &arguments);
     validate_environment();
-    validate_globals(&arguments);
+    let follow_link_policy = validate_globals(&arguments);
     let scenario = fs::read_to_string(fixture.join("scenario"))
         .unwrap_or_else(|_| "pass".to_owned())
         .trim()
@@ -21,10 +21,7 @@ fn main() {
     let command = command_arguments(&arguments);
     match command.as_slice() {
         [name, operation, width, height]
-            if name == "set"
-                && operation == "viewport"
-                && width == "1280"
-                && height == "720" =>
+            if name == "set" && operation == "viewport" && width == "1280" && height == "720" =>
         {
             if scenario == "prepare_timeout" {
                 std::thread::sleep(Duration::from_secs(2));
@@ -64,7 +61,10 @@ fn main() {
         }
         [name, url] if name == "open" => {
             if scenario == "domain_block" {
-                failure("Domain 'other.example' is not in the allowed domains list", 1);
+                failure(
+                    "Domain 'other.example' is not in the allowed domains list",
+                    1,
+                );
             }
             let observed = if scenario == "redirect" {
                 "http://127.0.0.1:9999/escaped"
@@ -89,11 +89,14 @@ fn main() {
             ));
         }
         [name, what] if name == "get" && what == "url" => {
+            if scenario == "click_unknown" && fixture.join("click-dispatched").exists() {
+                failure("fixture could not verify URL after click", 1);
+            }
             let url = fs::read_to_string(fixture.join("current-url"))
                 .unwrap_or_else(|_| "about:blank".to_owned());
             success(&format!(r#"{{"url":"{}"}}"#, json(url.trim())));
         }
-        [name, what, _selector] if name == "get" && what == "text" => match scenario.as_str() {
+        [name, what, selector] if name == "get" && what == "text" => match scenario.as_str() {
             "malformed" => println!("not-json"),
             "oversized" => println!("{}", "x".repeat(1_048_577)),
             "oversized_stderr" => {
@@ -123,10 +126,7 @@ fn main() {
                 std::process::exit(1);
             }
             "exit_success_envelope_failure" => {
-                println!(
-                    "{}",
-                    r#"{"success":false,"data":null,"error":"failed"}"#
-                )
+                println!("{}", r#"{"success":false,"data":null,"error":"failed"}"#)
             }
             "exit_failure_envelope_success" => {
                 println!(
@@ -144,19 +144,96 @@ fn main() {
             "escaped_text_origin" => {
                 success(r#"{"origin":"http://127.0.0.1:9999/escaped","text":"Hello"}"#)
             }
-            "fail_text" => {
-                success(r#"{"origin":"http://127.0.0.1:4173","text":"Different"}"#)
-            }
+            "fail_text" => success(r#"{"origin":"http://127.0.0.1:4173","text":"Different"}"#),
+            _ if selector == "#completion-heading" => success(
+                r#"{"origin":"http://127.0.0.1:4173/complete","text":"Complete"}"#,
+            ),
             _ => success(r#"{"origin":"http://127.0.0.1:4173","text":"Hello"}"#),
         },
-        [name, state, _selector] if name == "is" && state == "visible" => {
+        [name, state, selector] if name == "is" && state == "visible" => {
             success(if scenario == "escaped_visible_origin" {
                 r#"{"visible":true,"origin":"http://127.0.0.1:9999/escaped"}"#
-            } else if scenario == "hidden" {
+            } else if scenario == "hidden"
+                || scenario == "hidden_link" && selector.contains("a[href]")
+            {
                 r#"{"visible":false,"origin":"http://127.0.0.1:4173/"}"#
             } else {
                 r#"{"visible":true,"origin":"http://127.0.0.1:4173/"}"#
             });
+        }
+        [name, state, _selector] if name == "is" && state == "enabled" => {
+            require_follow_link_policy(follow_link_policy);
+            success(if scenario == "escaped_enabled_origin" {
+                r#"{"enabled":true,"origin":"http://127.0.0.1:9999/escaped"}"#
+            } else if scenario == "disabled" {
+                r#"{"enabled":false,"origin":"http://127.0.0.1:4173/"}"#
+            } else {
+                r#"{"enabled":true,"origin":"http://127.0.0.1:4173/"}"#
+            });
+        }
+        [name, what, _selector, attribute]
+            if name == "get" && what == "attr" && attribute == "href" =>
+        {
+            require_follow_link_policy(follow_link_policy);
+            let origin = if scenario == "escaped_attribute_origin" {
+                "http://127.0.0.1:9999/escaped"
+            } else {
+                "http://127.0.0.1:4173/"
+            };
+            let value = match scenario.as_str() {
+                "href_missing" => "null".to_owned(),
+                "href_mismatch" => r#""/unexpected""#.to_owned(),
+                "href_off_origin" => r#""http://127.0.0.1:9999/escaped""#.to_owned(),
+                _ => r#""/complete""#.to_owned(),
+            };
+            success(&format!(
+                r#"{{"value":{value},"origin":"{}"}}"#,
+                json(origin)
+            ));
+        }
+        [name, selector] if name == "click" => {
+            require_follow_link_policy(follow_link_policy);
+            match scenario.as_str() {
+                "click_error" => failure("fixture click failed", 1),
+                "click_timeout" => {
+                    fs::write(
+                        fixture.join("current-url"),
+                        "http://127.0.0.1:4173/complete",
+                    )
+                    .unwrap();
+                    std::thread::sleep(Duration::from_secs(2));
+                    success(&format!(r#"{{"clicked":"{}"}}"#, json(selector)));
+                }
+                "click_confirmation" => {
+                    success(r#"{"confirmation_required":true,"confirmation_id":"c_fixture"}"#)
+                }
+                "click_unknown" => {
+                    fs::write(fixture.join("click-dispatched"), b"1").unwrap();
+                    success(&format!(r#"{{"clicked":"{}"}}"#, json(selector)));
+                }
+                "click_response_mismatch" => success(r##"{"clicked":"#other-link"}"##),
+                "click_post_origin_escape" => {
+                    fs::write(fixture.join("current-url"), "http://127.0.0.1:9999/escaped")
+                        .unwrap();
+                    success(&format!(r#"{{"clicked":"{}"}}"#, json(selector)));
+                }
+                "click_wrong_destination" => {
+                    fs::write(
+                        fixture.join("current-url"),
+                        "http://127.0.0.1:4173/unexpected",
+                    )
+                    .unwrap();
+                    success(&format!(r#"{{"clicked":"{}"}}"#, json(selector)));
+                }
+                _ => {
+                    fs::write(
+                        fixture.join("current-url"),
+                        "http://127.0.0.1:4173/complete",
+                    )
+                    .unwrap();
+                    success(&format!(r#"{{"clicked":"{}"}}"#, json(selector)));
+                }
+            }
         }
         [name, what, _selector] if name == "get" && what == "box" => {
             success(if scenario == "invalid_box" {
@@ -221,7 +298,41 @@ fn log_arguments(directory: &Path, arguments: &[String]) {
         .append(true)
         .open(directory.join("calls.log"))
         .unwrap();
-    writeln!(log, "{}", arguments.join("\t")).unwrap();
+    let mut safe = arguments.to_vec();
+    if matches!(safe.get(17).map(String::as_str), Some("fill" | "type")) {
+        if let Some(value) = safe.get_mut(19) {
+            *value = "<redacted>".to_owned();
+        }
+    }
+    if safe.get(17).map(String::as_str) == Some("set")
+        && safe.get(18).map(String::as_str) == Some("credentials")
+    {
+        for value in safe.iter_mut().skip(19) {
+            *value = "<redacted>".to_owned();
+        }
+    }
+    let safe = safe
+        .iter()
+        .map(|value| log_field(value))
+        .collect::<Vec<_>>()
+        .join("\t");
+    writeln!(log, "{safe}").unwrap();
+}
+
+fn log_field(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| match character {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            character if character.is_control() => {
+                format!("\\u{{{:x}}}", character as u32).chars().collect()
+            }
+            character => vec![character],
+        })
+        .collect()
 }
 
 fn command_arguments(arguments: &[String]) -> Vec<String> {
@@ -243,7 +354,7 @@ fn validate_environment() {
     }
 }
 
-fn validate_globals(arguments: &[String]) {
+fn validate_globals(arguments: &[String]) -> bool {
     let valid_shape = arguments.len() >= 18
         && arguments[0] == "--session"
         && arguments[1].starts_with("crawlson-")
@@ -268,9 +379,17 @@ fn validate_globals(arguments: &[String]) {
         failure("invalid owned configuration", 9);
     }
     let policy = fs::read_to_string(&arguments[8]).unwrap_or_default();
-    let expected = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n";
-    if policy != expected {
+    let read_only = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n";
+    let follow_link = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\"]}\n";
+    if policy != read_only && policy != follow_link {
         failure("invalid action policy", 9);
+    }
+    policy == follow_link
+}
+
+fn require_follow_link_policy(follow_link_policy: bool) {
+    if !follow_link_policy {
+        failure("interaction command was not enabled by policy", 9);
     }
 }
 

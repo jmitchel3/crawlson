@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmitchel3/crawlson/schemas/run-report-v2.schema.json",
+  "title": "Crawlson run report v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "crawlson_version",
+    "run_id",
+    "run_directory",
+    "journey",
+    "action_authorization",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "duration_ms",
+    "outcome",
+    "execution_outcome",
+    "reason",
+    "execution_reason",
+    "driver",
+    "steps",
+    "artifacts",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "crawlson_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "run_directory": { "type": "string" },
+    "journey": { "$ref": "#/$defs/journey" },
+    "target_origin": { "type": "string" },
+    "action_authorization": { "$ref": "#/$defs/action_authorization" },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "outcome": { "$ref": "#/$defs/outcome" },
+    "execution_outcome": { "$ref": "#/$defs/outcome" },
+    "reason": { "$ref": "#/$defs/reason" },
+    "execution_reason": { "$ref": "#/$defs/reason" },
+    "driver": { "$ref": "#/$defs/driver" },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "diagnostics": { "$ref": "#/$defs/diagnostics" },
+    "cleanup": { "$ref": "#/$defs/cleanup" }
+  },
+  "$defs": {
+    "outcome": {
+      "enum": ["passed", "failed", "blocked", "error"]
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_path"],
+      "properties": {
+        "source_path": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "commands"],
+      "properties": {
+        "name": { "const": "agent-browser" },
+        "version": { "type": "string" },
+        "session": { "type": "string", "pattern": "^[a-z0-9_-]{1,48}$" },
+        "commands": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/driver_command" }
+        }
+      }
+    },
+    "action_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "granted", "binding_sha256"],
+      "properties": {
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}@[1-9][0-9]*:[a-z0-9._-]{1,96}$" }
+        },
+        "granted": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}@[1-9][0-9]*:[a-z0-9._-]{1,96}$" }
+        },
+        "binding_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "driver_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "capability",
+        "duration_ms",
+        "exit_code",
+        "upstream_success",
+        "stdout_bytes",
+        "stdout_captured_bytes",
+        "stdout_captured_sha256",
+        "stderr_bytes",
+        "stderr_captured_bytes",
+        "stderr_captured_sha256"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "capability": { "type": "string", "minLength": 1 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "exit_code": { "type": ["integer", "null"] },
+        "upstream_success": { "type": "boolean" },
+        "stdout_bytes": { "type": "integer", "minimum": 0 },
+        "stdout_captured_bytes": { "type": "integer", "minimum": 0 },
+        "stdout_captured_sha256": { "$ref": "#/$defs/sha256" },
+        "stderr_bytes": { "type": "integer", "minimum": 0 },
+        "stderr_captured_bytes": { "type": "integer", "minimum": 0 },
+        "stderr_captured_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "id",
+        "title",
+        "kind",
+        "status",
+        "started_at_unix_ms",
+        "duration_ms",
+        "observation"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["navigate", "check_url", "check_text", "capture", "follow_link"] },
+        "status": { "$ref": "#/$defs/outcome" },
+        "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "observation": { "$ref": "#/$defs/observation" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "follow_link" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "observation": {
+                "required": ["expected_url", "action_state", "action_grant_sha256"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": { "const": "follow_link" },
+              "status": { "const": "passed" }
+            },
+            "required": ["kind", "status"]
+          },
+          "then": {
+            "properties": {
+              "observation": {
+                "required": [
+                  "visible",
+                  "enabled",
+                  "matched",
+                  "artifact_path",
+                  "capture_token",
+                  "box_command_sequence",
+                  "screenshot_command_sequence",
+                  "action_command_sequence",
+                  "before_url",
+                  "target_href"
+                ],
+                "properties": {
+                  "visible": { "const": true },
+                  "enabled": { "const": true },
+                  "matched": { "const": true },
+                  "action_state": { "const": "effect_verified" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected_url": { "type": "string" },
+        "observed_url": { "type": "string" },
+        "matched": { "type": "boolean" },
+        "visible": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "observed_text_sha256": { "$ref": "#/$defs/sha256" },
+        "artifact_path": { "type": "string", "minLength": 1 },
+        "target_box_css": { "$ref": "#/$defs/css_box" },
+        "viewport": { "$ref": "#/$defs/viewport" },
+        "capture_token": { "type": "string", "minLength": 1 },
+        "box_command_sequence": { "type": "integer", "minimum": 1 },
+        "screenshot_command_sequence": { "type": "integer", "minimum": 1 },
+        "detail": { "type": "string" },
+        "action_state": {
+          "enum": ["not_attempted", "driver_acknowledged", "effect_verified", "effect_unknown"]
+        },
+        "action_grant_sha256": { "$ref": "#/$defs/sha256" },
+        "action_command_sequence": { "type": "integer", "minimum": 1 },
+        "before_url": { "type": "string" },
+        "target_href": { "type": "string" }
+      }
+    },
+    "css_box": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width_css",
+        "height_css",
+        "device_scale_factor",
+        "scroll_x_css",
+        "scroll_y_css"
+      ],
+      "properties": {
+        "width_css": { "type": "number", "exclusiveMinimum": 0 },
+        "height_css": { "type": "number", "exclusiveMinimum": 0 },
+        "device_scale_factor": { "type": "number", "exclusiveMinimum": 0 },
+        "scroll_x_css": { "type": ["number", "null"] },
+        "scroll_y_css": { "type": ["number", "null"] }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "size_bytes", "media_type", "sha256"],
+      "properties": {
+        "kind": {
+          "enum": ["raw_screenshot", "focused_screenshot", "focus_metadata", "trace"]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "media_type": { "enum": ["image/png", "application/json"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "step_id": { "type": "string", "pattern": "^[a-z0-9._-]{1,96}$" },
+        "source_artifact": { "type": "string", "minLength": 1 }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["console_messages", "console_sha256", "page_errors", "page_errors_sha256"],
+      "properties": {
+        "console_messages": { "type": "integer", "minimum": 0 },
+        "console_sha256": { "$ref": "#/$defs/sha256" },
+        "page_errors": { "type": "integer", "minimum": 0 },
+        "page_errors_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "status"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "status": { "enum": ["not_needed", "passed", "failed"] },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

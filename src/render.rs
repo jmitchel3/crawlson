@@ -340,10 +340,10 @@ fn read_regular_bounded(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8
 }
 
 fn validate_report_header(report: &InputRunReport) -> Result<(), RenderError> {
-    if report.schema_version != 1 {
+    if !matches!(report.schema_version, 1 | 2) {
         return Err(RenderError::new(
             "report_version_unsupported",
-            "only run report schema version 1 can be rendered",
+            "only run report schema versions 1 and 2 can be rendered",
         ));
     }
     if report.run_directory.len() > 32_768 || report.run_directory.chars().any(char::is_control) {
@@ -464,6 +464,9 @@ fn validate_driver(driver: &InputDriver) -> Result<(), RenderError> {
         "current_url",
         "text",
         "is_visible",
+        "is_enabled",
+        "get_attribute",
+        "click",
         "bounding_box",
         "screenshot",
         "console",
@@ -530,43 +533,50 @@ fn validate_completed_driver(
             .filter(|command| command.capability == capability)
             .count()
     };
-    let navigate_count = journey
-        .steps
+    let executed_pairs = journey.steps.iter().zip(&report.steps).collect::<Vec<_>>();
+    let navigate_count = executed_pairs
         .iter()
-        .filter(|step| matches!(step.action, ValidatedAction::Navigate { .. }))
+        .filter(|(declared, _)| matches!(declared.action, ValidatedAction::Navigate { .. }))
         .count();
-    let visible_count = journey
+    let visible_count = report
         .steps
         .iter()
-        .filter(|step| {
-            matches!(
-                step.action,
-                ValidatedAction::CheckText { .. } | ValidatedAction::Capture { .. }
-            )
-        })
+        .filter(|step| step.observation.visible.is_some())
         .count();
-    let text_count = journey
-        .steps
+    let text_count = executed_pairs
         .iter()
-        .zip(&report.steps)
         .filter(|(declared, executed)| {
             matches!(declared.action, ValidatedAction::CheckText { .. })
                 && executed.observation.visible == Some(true)
         })
         .count();
-    let capture_count = journey
+    let enabled_count = report
         .steps
         .iter()
-        .zip(&report.steps)
-        .filter(|(declared, executed)| {
-            matches!(declared.action, ValidatedAction::Capture { .. })
-                && executed.status == Outcome::Passed
-        })
+        .filter(|step| step.observation.enabled.is_some())
+        .count();
+    let attribute_count = report
+        .steps
+        .iter()
+        .filter(|step| step.kind == "follow_link" && step.observation.enabled == Some(true))
+        .count();
+    let capture_count = report
+        .steps
+        .iter()
+        .filter(|step| step.observation.box_command_sequence.is_some())
+        .count();
+    let click_count = report
+        .steps
+        .iter()
+        .filter(|step| step.observation.action_command_sequence.is_some())
         .count();
     if count("set_viewport") != 1
         || count("trace_start") != 1
         || count("navigate") != navigate_count
         || count("is_visible") != visible_count
+        || count("is_enabled") != enabled_count
+        || count("get_attribute") != attribute_count
+        || count("click") != click_count
         || count("text") != text_count
         || count("bounding_box") != capture_count
         || count("screenshot") != capture_count
@@ -586,16 +596,26 @@ fn validate_completed_driver(
     for step in report
         .steps
         .iter()
-        .filter(|step| step.kind == "capture" && step.status == Outcome::Passed)
+        .filter(|step| step.observation.box_command_sequence.is_some())
     {
         let box_sequence = step.observation.box_command_sequence.unwrap_or(0);
         let screenshot_sequence = step.observation.screenshot_command_sequence.unwrap_or(0);
         let box_command = commands.get(box_sequence.saturating_sub(1) as usize);
         let screenshot_command = commands.get(screenshot_sequence.saturating_sub(1) as usize);
+        let action_sequence = step.observation.action_command_sequence;
+        let action_command =
+            action_sequence.and_then(|sequence| commands.get(sequence.saturating_sub(1) as usize));
+        let expected_token = action_sequence.map_or_else(
+            || format!("{session}:{box_sequence}:{screenshot_sequence}"),
+            |sequence| format!("{session}:{box_sequence}:{screenshot_sequence}:{sequence}"),
+        );
         if box_command.is_none_or(|command| command.capability != "bounding_box")
             || screenshot_command.is_none_or(|command| command.capability != "screenshot")
-            || step.observation.capture_token.as_deref()
-                != Some(format!("{session}:{box_sequence}:{screenshot_sequence}").as_str())
+            || action_sequence.is_some()
+                && action_command.is_none_or(|command| command.capability != "click")
+            || action_sequence
+                .is_some_and(|sequence| sequence != screenshot_sequence.saturating_add(1))
+            || step.observation.capture_token.as_deref() != Some(expected_token.as_str())
         {
             return Err(RenderError::new(
                 "report_invalid",
@@ -610,7 +630,9 @@ fn validate_provenance(
     report: &InputRunReport,
     journey: &ValidatedJourney,
 ) -> Result<(), RenderError> {
-    if report.journey.source_path.is_empty()
+    let expected_report_version = if journey.schema_version >= 3 { 2 } else { 1 };
+    if report.schema_version != expected_report_version
+        || report.journey.source_path.is_empty()
         || report.journey.source_path.contains(['/', '\\'])
         || report.journey.source_sha256.as_deref() != Some(&journey.source_sha256)
         || report.journey.id.as_deref() != Some(&journey.meta.id)
@@ -620,6 +642,64 @@ fn validate_provenance(
         return Err(RenderError::new(
             "journey_drift",
             "journey source, digest, identity, revision, or target differs from the run",
+        ));
+    }
+    validate_action_authorization(report, journey)?;
+    Ok(())
+}
+
+fn validate_action_authorization(
+    report: &InputRunReport,
+    journey: &ValidatedJourney,
+) -> Result<(), RenderError> {
+    let mut required = journey
+        .steps
+        .iter()
+        .filter(|step| matches!(step.action, ValidatedAction::FollowLink { .. }))
+        .map(|step| format!("{}@{}:{}", journey.meta.id, journey.meta.revision, step.id))
+        .collect::<Vec<_>>();
+    required.sort();
+    if required.is_empty() && journey.schema_version < 3 {
+        if report.action_authorization.is_some() {
+            return Err(RenderError::new(
+                "report_invalid",
+                "read-only report unexpectedly contains action authorization",
+            ));
+        }
+        return Ok(());
+    }
+    let authorization = report.action_authorization.as_ref().ok_or_else(|| {
+        RenderError::new(
+            "report_invalid",
+            "interactive report omitted action authorization provenance",
+        )
+    })?;
+    let mut sorted_granted = authorization.granted.clone();
+    sorted_granted.sort();
+    sorted_granted.dedup();
+    if authorization.required != required
+        || authorization.granted != sorted_granted
+        || !is_sha256(&authorization.binding_sha256)
+        || (!report.driver.commands.is_empty() && authorization.granted != required)
+    {
+        return Err(RenderError::new(
+            "report_invalid",
+            "action authorization grants do not match the journey",
+        ));
+    }
+    let binding = format!(
+        "crawlson-action-grant-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nrequired={}\ngranted={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        required.join(","),
+        authorization.granted.join(",")
+    );
+    if authorization.binding_sha256 != journey::hex_digest(binding.as_bytes()) {
+        return Err(RenderError::new(
+            "report_invalid",
+            "action authorization binding digest is invalid",
         ));
     }
     Ok(())
@@ -644,6 +724,16 @@ fn validate_renderable_journey(journey: &ValidatedJourney) -> Result<(), RenderE
                 } => safe_single_line(selector, 4_096) && safe_prose(expected, 65_536),
                 ValidatedAction::Capture { selector, alt_text } => {
                     safe_single_line(selector, 4_096) && safe_prose(alt_text, 4_096)
+                }
+                ValidatedAction::FollowLink {
+                    selector,
+                    expected_url,
+                    alt_text,
+                } => {
+                    safe_single_line(selector, 4_096)
+                        && safe_prose(alt_text, 4_096)
+                        && expected_url.query().is_none()
+                        && expected_url.fragment().is_none()
                 }
             }
     });
@@ -689,8 +779,15 @@ fn validate_steps(report: &InputRunReport, journey: &ValidatedJourney) -> Result
             "a completed pass or checkpoint failure requires diagnostics",
         ));
     }
+    let stopped_at_failed_action = report.execution_outcome == Outcome::Failed
+        && report.steps.len() < journey.steps.len()
+        && report
+            .steps
+            .last()
+            .is_some_and(|step| step.status == Outcome::Failed && step.kind == "follow_link");
     if matches!(report.execution_outcome, Outcome::Passed | Outcome::Failed)
         && report.steps.len() != journey.steps.len()
+        && !stopped_at_failed_action
     {
         return Err(RenderError::new(
             "run_incomplete",
@@ -717,7 +814,7 @@ fn validate_steps(report: &InputRunReport, journey: &ValidatedJourney) -> Result
             ));
         }
         let _step_wall_clock_metadata = step.started_at_unix_ms;
-        validate_observation(step, &declared.action, &journey.origin)?;
+        validate_observation(step, &declared.action, journey)?;
     }
     if report.outcome == Outcome::Passed
         && report
@@ -760,13 +857,34 @@ fn validate_steps(report: &InputRunReport, journey: &ValidatedJourney) -> Result
 fn validate_observation(
     step: &InputStep,
     action: &ValidatedAction,
-    origin: &journey::Origin,
+    journey: &ValidatedJourney,
 ) -> Result<(), RenderError> {
+    let origin = &journey.origin;
     let observation = &step.observation;
+    let expected_action_binding = matches!(action, ValidatedAction::FollowLink { .. }).then(|| {
+        let grant = format!(
+            "{}@{}:{}",
+            journey.meta.id, journey.meta.revision, step.id
+        );
+        let binding = format!(
+            "crawlson-action-step-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nstep={}\ngrant={}\n",
+            journey.meta.id,
+            journey.meta.revision,
+            journey.source_sha256,
+            journey.origin,
+            step.id,
+            grant
+        );
+        journey::hex_digest(binding.as_bytes())
+    });
     if observation
         .observed_text_sha256
         .as_deref()
         .is_some_and(|value| !is_sha256(value))
+        || observation
+            .action_grant_sha256
+            .as_deref()
+            .is_some_and(|value| !is_sha256(value))
     {
         return Err(RenderError::new(
             "report_invalid",
@@ -781,6 +899,14 @@ fn validate_observation(
         .is_some_and(|value| url::Url::parse(value).is_err())
         || observation
             .observed_url
+            .as_deref()
+            .is_some_and(|value| value != "unauthorized-origin" && url::Url::parse(value).is_err())
+        || observation
+            .before_url
+            .as_deref()
+            .is_some_and(|value| value != "unauthorized-origin" && url::Url::parse(value).is_err())
+        || observation
+            .target_href
             .as_deref()
             .is_some_and(|value| value != "unauthorized-origin" && url::Url::parse(value).is_err())
     {
@@ -804,9 +930,11 @@ fn validate_observation(
         }
     }
     let declared_url = match action {
-        ValidatedAction::Navigate { url } | ValidatedAction::CheckUrl { url } => {
-            Some(safe_declared_url(url))
-        }
+        ValidatedAction::Navigate { url }
+        | ValidatedAction::CheckUrl { url }
+        | ValidatedAction::FollowLink {
+            expected_url: url, ..
+        } => Some(safe_declared_url(url)),
         _ => None,
     };
     if declared_url.is_some() && observation.expected_url != declared_url {
@@ -859,9 +987,44 @@ fn validate_observation(
                 ));
             }
         }
+        "follow_link" if step.status == Outcome::Passed => {
+            if observation.visible != Some(true)
+                || observation.enabled != Some(true)
+                || observation.matched != Some(true)
+                || observation.action_state != Some(InputActionState::EffectVerified)
+                || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+                || observation.action_command_sequence.is_none()
+                || observation.before_url.is_none()
+                || observation.target_href != observation.expected_url
+                || observation.artifact_path.is_none()
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "passed link action provenance is incomplete",
+                ));
+            }
+        }
+        "follow_link" if step.status == Outcome::Failed => {
+            if observation.matched != Some(false)
+                || !matches!(
+                    (observation.visible, observation.enabled),
+                    (Some(false), None) | (Some(true), Some(_))
+                )
+                || !matches!(
+                    observation.action_state,
+                    Some(InputActionState::NotAttempted | InputActionState::DriverAcknowledged)
+                )
+                || observation.action_grant_sha256.as_ref() != expected_action_binding.as_ref()
+            {
+                return Err(RenderError::new(
+                    "report_invalid",
+                    "failed link action provenance contradicts its status",
+                ));
+            }
+        }
         _ => {}
     }
-    if step.kind == "capture"
+    if matches!(step.kind.as_str(), "capture" | "follow_link")
         && step.status == Outcome::Passed
         && (observation.visible != Some(true)
             || observation.artifact_path.is_none()
@@ -904,10 +1067,15 @@ fn verify_artifacts(
     journey: &ValidatedJourney,
 ) -> Result<VerifiedArtifacts, RenderError> {
     let step_ids: HashSet<&str> = journey.steps.iter().map(|step| step.id.as_str()).collect();
-    let capture_ids: HashSet<&str> = journey
+    let evidence_ids: HashSet<&str> = journey
         .steps
         .iter()
-        .filter(|step| matches!(step.action, ValidatedAction::Capture { .. }))
+        .filter(|step| {
+            matches!(
+                step.action,
+                ValidatedAction::Capture { .. } | ValidatedAction::FollowLink { .. }
+            )
+        })
         .map(|step| step.id.as_str())
         .collect();
     let mut by_path = HashMap::new();
@@ -921,7 +1089,7 @@ fn verify_artifacts(
     let mut trace = None;
 
     for artifact in &report.artifacts {
-        validate_artifact_contract(artifact, &step_ids, &capture_ids)?;
+        validate_artifact_contract(artifact, &step_ids, &evidence_ids)?;
         total = total
             .checked_add(artifact.size_bytes)
             .ok_or_else(|| RenderError::new("artifact_invalid", "artifact sizes overflowed"))?;
@@ -1043,21 +1211,20 @@ fn verify_artifacts(
             .ok_or_else(|| RenderError::new("report_invalid", "focus step is not executed"))?;
         verify_focus_metadata(artifact, bytes, &by_path, &png_inspections, journey, step)?;
     }
-    for step in report
-        .steps
-        .iter()
-        .filter(|step| step.kind == "capture" && step.status == Outcome::Passed)
-    {
+    for step in report.steps.iter().filter(|step| {
+        matches!(step.kind.as_str(), "capture" | "follow_link")
+            && step.observation.box_command_sequence.is_some()
+    }) {
         let focused = focused_by_step.get(&step.id).ok_or_else(|| {
             RenderError::new(
                 "artifact_missing",
-                "passed capture has no focused screenshot",
+                "focused evidence step has no focused screenshot",
             )
         })?;
         if step.observation.artifact_path.as_deref() != Some(&focused.path) {
             return Err(RenderError::new(
                 "report_invalid",
-                "capture observation does not reference its focused screenshot",
+                "focused evidence observation does not reference its screenshot",
             ));
         }
         let metadata_count = report
@@ -1070,7 +1237,7 @@ fn verify_artifacts(
         if metadata_count != 1 {
             return Err(RenderError::new(
                 "artifact_missing",
-                "passed capture requires exactly one focus metadata artifact",
+                "focused evidence requires exactly one focus metadata artifact",
             ));
         }
     }
@@ -1101,7 +1268,7 @@ fn verify_artifacts(
 fn validate_artifact_contract(
     artifact: &InputArtifact,
     step_ids: &HashSet<&str>,
-    capture_ids: &HashSet<&str>,
+    evidence_ids: &HashSet<&str>,
 ) -> Result<(), RenderError> {
     if artifact.size_bytes == 0
         || artifact.size_bytes > artifact_maximum(&artifact.kind)
@@ -1137,10 +1304,10 @@ fn validate_artifact_contract(
                 "capture artifact does not identify a capture step",
             ));
         };
-        if !step_ids.contains(step_id) || !capture_ids.contains(step_id) {
+        if !step_ids.contains(step_id) || !evidence_ids.contains(step_id) {
             return Err(RenderError::new(
                 "report_invalid",
-                "capture artifact references an unknown or non-capture step",
+                "focused artifact references an unknown or non-evidence step",
             ));
         }
         if (artifact.kind == "raw_screenshot" && artifact.source_artifact.is_some())
@@ -1190,11 +1357,15 @@ fn verify_focus_metadata(
         .iter()
         .find(|step| step.id == step_id)
         .ok_or_else(|| RenderError::new("journey_drift", "focus step is no longer declared"))?;
-    let ValidatedAction::Capture { alt_text, .. } = &declared.action else {
-        return Err(RenderError::new(
-            "report_invalid",
-            "focus metadata references a non-capture step",
-        ));
+    let alt_text = match &declared.action {
+        ValidatedAction::Capture { alt_text, .. }
+        | ValidatedAction::FollowLink { alt_text, .. } => alt_text,
+        _ => {
+            return Err(RenderError::new(
+                "report_invalid",
+                "focus metadata references a non-evidence step",
+            ));
+        }
     };
     let source = by_path.get(&metadata.source.path);
     let derivative = by_path.get(&metadata.derivative.path);
@@ -1461,18 +1632,37 @@ fn build_guide(
         let Some(instruction) = declared.guide_instruction.as_deref() else {
             continue;
         };
-        let ValidatedAction::Capture { alt_text, .. } = &declared.action else {
-            return publish(
-                root,
-                not_publishable(
-                    &report,
-                    rendered_journey,
-                    report_sha256,
-                    "guide_step_unverified",
-                    "guide instructions must belong to passed capture steps with focused evidence",
-                ),
-                Vec::new(),
-            );
+        let (alt_text, action_executed) = match &declared.action {
+            ValidatedAction::Capture { alt_text, .. } => (alt_text, false),
+            ValidatedAction::FollowLink { alt_text, .. } => {
+                if executed.observation.action_state != Some(InputActionState::EffectVerified) {
+                    return publish(
+                        root,
+                        not_publishable(
+                            &report,
+                            rendered_journey,
+                            report_sha256,
+                            "guide_step_unverified",
+                            "a guide action was not executed and effect-verified",
+                        ),
+                        Vec::new(),
+                    );
+                }
+                (alt_text, true)
+            }
+            _ => {
+                return publish(
+                    root,
+                    not_publishable(
+                        &report,
+                        rendered_journey,
+                        report_sha256,
+                        "guide_step_unverified",
+                        "guide instructions must belong to passed focused-evidence steps",
+                    ),
+                    Vec::new(),
+                );
+            }
         };
         if executed.status != Outcome::Passed {
             return publish(
@@ -1512,6 +1702,7 @@ fn build_guide(
             alt_text: alt_text.clone(),
             image_path: local_image,
             image_sha256: focused.sha256.clone(),
+            action_executed,
         });
     }
     if guide_steps.is_empty() {
@@ -1598,6 +1789,7 @@ struct GuideStep {
     alt_text: String,
     image_path: String,
     image_sha256: String,
+    action_executed: bool,
 }
 
 fn guide_markdown(
@@ -1605,24 +1797,36 @@ fn guide_markdown(
     report: &InputRunReport,
     steps: &[GuideStep],
 ) -> String {
+    let verification_scope = if journey.schema_version >= 3 {
+        "the declared checkpoints, authorized actions, and focused evidence"
+    } else {
+        "the declared checkpoints and captures"
+    };
     let mut markdown = format!(
-        "# {}\n\n{}\n\nDeclared expected outcome: {}\n\nCrawlson run `{}` passed the declared checkpoints and captures for journey `{}` revision {} (`{}`). Free-form outcome prose is authored context, not an additional executed assertion.\n",
+        "# {}\n\n{}\n\nDeclared expected outcome: {}\n\nCrawlson run `{}` passed {} for journey `{}` revision {} (`{}`). Free-form outcome prose is authored context, not an additional executed assertion.\n",
         escape_markdown(&journey.meta.title),
         escape_markdown(&journey.meta.purpose),
         escape_markdown(&journey.meta.expected_outcome),
         escape_code(&report.run_id),
+        verification_scope,
         escape_code(&journey.meta.id),
         journey.meta.revision,
         journey.source_sha256
     );
     for step in steps {
+        let verification = if step.action_executed {
+            "Crawlson executed this highlighted link action once and verified its exact declared same-origin destination."
+        } else {
+            "The highlighted action area was observed in the read-only run. The authored instruction describes the reader's next action; Crawlson does not claim that action was executed."
+        };
         markdown.push_str(&format!(
-            "\n## {}. {}\n\n{}\n\n![{}]({})\n\nThe highlighted action area was observed in the read-only run. The authored instruction describes the reader's next action; Crawlson v1 does not claim that action was executed.\n\nEvidence SHA-256: `{}`\n",
+            "\n## {}. {}\n\n{}\n\n![{}]({})\n\n{}\n\nEvidence SHA-256: `{}`\n",
             step.number,
             escape_markdown(&step.title),
             escape_markdown(&step.instruction),
             escape_alt_text(&step.alt_text),
             markdown_path(&step.image_path),
+            verification,
             step.image_sha256
         ));
     }
@@ -1640,7 +1844,10 @@ fn build_findings(
     if report.steps.iter().any(|step| {
         step.status != Outcome::Passed
             && !(step.status == Outcome::Failed
-                && matches!(step.kind.as_str(), "check_url" | "check_text"))
+                && matches!(
+                    step.kind.as_str(),
+                    "check_url" | "check_text" | "follow_link"
+                ))
     }) {
         let mut result = not_publishable(
             &report,
@@ -1658,7 +1865,10 @@ fn build_findings(
         .enumerate()
         .filter(|(_, step)| {
             step.status == Outcome::Failed
-                && matches!(step.kind.as_str(), "check_url" | "check_text")
+                && matches!(
+                    step.kind.as_str(),
+                    "check_url" | "check_text" | "follow_link"
+                )
         })
         .map(|(index, _)| index)
         .collect();
@@ -1693,6 +1903,24 @@ fn build_findings(
         }];
         if let Some(trace) = &artifacts.trace {
             evidence.push(FindingEvidence::from_artifact(trace));
+        }
+        if failed.kind == "follow_link" {
+            for artifact in [
+                artifacts.raw_by_step.get(&failed.id),
+                artifacts.focused_by_step.get(&failed.id),
+                artifacts.metadata_by_step.get(&failed.id),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                evidence.push(FindingEvidence {
+                    kind: artifact.kind.clone(),
+                    path: artifact.path.clone(),
+                    sha256: artifact.sha256.clone(),
+                    capture_step_id: Some(failed.id.clone()),
+                    association_source: Some("action.preflight"),
+                });
+            }
         }
         for (declared, executed) in journey.steps.iter().zip(&report.steps) {
             if declared
@@ -1737,7 +1965,7 @@ fn build_findings(
         });
     }
     let document = FindingsDocument {
-        schema_version: 1,
+        schema_version: if journey.schema_version >= 3 { 2 } else { 1 },
         run_id: report.run_id.clone(),
         journey: rendered_journey.clone(),
         findings,
@@ -1825,7 +2053,11 @@ struct Checkpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     matched: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_state: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_text_sha256: Option<String>,
 }
@@ -1870,6 +2102,10 @@ enum ReproductionAction {
     Capture {
         selector: String,
     },
+    FollowLink {
+        selector: String,
+        expected_path: String,
+    },
 }
 
 impl From<&ValidatedAction> for ReproductionAction {
@@ -1895,6 +2131,14 @@ impl From<&ValidatedAction> for ReproductionAction {
             },
             ValidatedAction::Capture { selector, .. } => Self::Capture {
                 selector: selector.clone(),
+            },
+            ValidatedAction::FollowLink {
+                selector,
+                expected_url,
+                ..
+            } => Self::FollowLink {
+                selector: selector.clone(),
+                expected_path: expected_url.path().to_owned(),
             },
         }
     }
@@ -1923,7 +2167,7 @@ impl FindingEvidence {
     }
 }
 
-fn reproduction_markdown(action: &ReproductionAction) -> String {
+fn reproduction_markdown(action: &ReproductionAction, failed_finding_kind: Option<&str>) -> String {
     match action {
         ReproductionAction::Navigate { path } => {
             format!("Open path {}.", escape_markdown(path))
@@ -1951,6 +2195,33 @@ fn reproduction_markdown(action: &ReproductionAction) -> String {
                 escape_code(selector)
             )
         }
+        ReproductionAction::FollowLink {
+            selector,
+            expected_path,
+        } => match failed_finding_kind {
+            Some("link_not_visible") => format!(
+                "Inspect `{}`; the declared link should be visible.",
+                escape_code(selector)
+            ),
+            Some("link_not_enabled") => format!(
+                "Inspect `{}`; the declared link should be enabled.",
+                escape_code(selector)
+            ),
+            Some("link_target_invalid") => format!(
+                "Inspect the href on `{}`; it should be a valid bounded URL.",
+                escape_code(selector)
+            ),
+            Some("link_destination_mismatch") => format!(
+                "Inspect the href on `{}` and compare it with {}.",
+                escape_code(selector),
+                escape_markdown(expected_path)
+            ),
+            _ => format!(
+                "Select the link at `{}` and confirm it reaches {}.",
+                escape_code(selector),
+                escape_markdown(expected_path)
+            ),
+        },
     }
 }
 
@@ -1961,6 +2232,21 @@ fn failure_symptom(step: &InputStep) -> &'static str {
             "Declared visible text was not visible."
         }
         "check_text" => "Visible text did not match the declared checkpoint.",
+        "follow_link" if step.observation.visible == Some(false) => {
+            "The declared link was not visible."
+        }
+        "follow_link" if step.observation.enabled == Some(false) => {
+            "The declared link was visible but not enabled."
+        }
+        "follow_link"
+            if step.observation.action_state == Some(InputActionState::DriverAcknowledged) =>
+        {
+            "The link action completed, but the browser reached a different same-origin destination."
+        }
+        "follow_link" if step.observation.target_href.is_none() => {
+            "The declared link did not expose a valid bounded destination."
+        }
+        "follow_link" => "The declared link href did not match its expected destination.",
         _ => "Declared checkpoint failed.",
     }
 }
@@ -1979,6 +2265,15 @@ fn finding_kind(step: &InputStep) -> &'static str {
         "check_url" => "url_mismatch",
         "check_text" if step.observation.visible == Some(false) => "target_not_visible",
         "check_text" => "text_mismatch",
+        "follow_link" if step.observation.visible == Some(false) => "link_not_visible",
+        "follow_link" if step.observation.enabled == Some(false) => "link_not_enabled",
+        "follow_link"
+            if step.observation.action_state == Some(InputActionState::DriverAcknowledged) =>
+        {
+            "link_postcondition_mismatch"
+        }
+        "follow_link" if step.observation.target_href.is_none() => "link_target_invalid",
+        "follow_link" => "link_destination_mismatch",
         _ => "checkpoint_failure",
     }
 }
@@ -1994,7 +2289,9 @@ fn checkpoint(action: &ValidatedAction, step: &InputStep) -> Checkpoint {
                 .as_deref()
                 .map(safe_observed_path),
             visible: None,
+            enabled: None,
             matched: step.observation.matched,
+            action_state: None,
             observed_text_sha256: None,
         },
         ValidatedAction::CheckText {
@@ -2009,8 +2306,27 @@ fn checkpoint(action: &ValidatedAction, step: &InputStep) -> Checkpoint {
             }),
             observed_path: None,
             visible: step.observation.visible,
+            enabled: None,
             matched: step.observation.matched,
+            action_state: None,
             observed_text_sha256: step.observation.observed_text_sha256.clone(),
+        },
+        ValidatedAction::FollowLink { expected_url, .. } => Checkpoint {
+            expected: expected_url.path().to_owned(),
+            comparison: Some("exact"),
+            observed_path: match step.observation.action_state {
+                Some(InputActionState::DriverAcknowledged) => {
+                    step.observation.observed_url.as_deref()
+                }
+                Some(InputActionState::NotAttempted) => step.observation.target_href.as_deref(),
+                _ => None,
+            }
+            .map(safe_observed_path),
+            visible: step.observation.visible,
+            enabled: step.observation.enabled,
+            matched: step.observation.matched,
+            action_state: step.observation.action_state.map(action_state_name),
+            observed_text_sha256: None,
         },
         _ => unreachable!("findings are created only from checkpoint actions"),
     }
@@ -2050,7 +2366,10 @@ fn findings_markdown(journey: &ValidatedJourney, document: &FindingsDocument) ->
                 outcome_name(step.status),
                 escape_markdown(&step.title),
                 escape_code(&step.id),
-                reproduction_markdown(&step.action)
+                reproduction_markdown(
+                    &step.action,
+                    (step.sequence == finding.step.sequence).then_some(finding.kind),
+                )
             ));
         }
         markdown.push_str("\n### Evidence\n");
@@ -2074,6 +2393,9 @@ fn checkpoint_observed_markdown(checkpoint: &Checkpoint) -> String {
     if let Some(visible) = checkpoint.visible {
         values.push(format!("visible `{visible}`"));
     }
+    if let Some(enabled) = checkpoint.enabled {
+        values.push(format!("enabled `{enabled}`"));
+    }
     if let Some(matched) = checkpoint.matched {
         values.push(format!("matched `{matched}`"));
     }
@@ -2084,6 +2406,15 @@ fn checkpoint_observed_markdown(checkpoint: &Checkpoint) -> String {
         "no value recorded".to_owned()
     } else {
         values.join(", ")
+    }
+}
+
+fn action_state_name(state: InputActionState) -> &'static str {
+    match state {
+        InputActionState::NotAttempted => "not_attempted",
+        InputActionState::DriverAcknowledged => "driver_acknowledged",
+        InputActionState::EffectVerified => "effect_verified",
+        InputActionState::EffectUnknown => "effect_unknown",
     }
 }
 
@@ -2188,6 +2519,7 @@ fn action_kind(action: &ValidatedAction) -> &'static str {
         ValidatedAction::Navigate { .. } => "navigate",
         ValidatedAction::CheckUrl { .. } => "check_url",
         ValidatedAction::CheckText { .. } => "check_text",
+        ValidatedAction::FollowLink { .. } => "follow_link",
         ValidatedAction::Capture { .. } => "capture",
     }
 }
@@ -2267,6 +2599,7 @@ struct InputRunReport {
     run_directory: String,
     journey: InputJourney,
     target_origin: Option<String>,
+    action_authorization: Option<InputActionAuthorization>,
     started_at_unix_ms: u64,
     finished_at_unix_ms: u64,
     duration_ms: u64,
@@ -2279,6 +2612,14 @@ struct InputRunReport {
     artifacts: Vec<InputArtifact>,
     diagnostics: Option<InputDiagnostics>,
     cleanup: InputCleanup,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputActionAuthorization {
+    required: Vec<String>,
+    granted: Vec<String>,
+    binding_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2342,6 +2683,7 @@ struct InputObservation {
     observed_url: Option<String>,
     matched: Option<bool>,
     visible: Option<bool>,
+    enabled: Option<bool>,
     observed_text_sha256: Option<String>,
     artifact_path: Option<String>,
     target_box_css: Option<InputCssBox>,
@@ -2350,6 +2692,11 @@ struct InputObservation {
     box_command_sequence: Option<u32>,
     screenshot_command_sequence: Option<u32>,
     detail: Option<String>,
+    action_state: Option<InputActionState>,
+    action_grant_sha256: Option<String>,
+    action_command_sequence: Option<u32>,
+    before_url: Option<String>,
+    target_href: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2388,6 +2735,15 @@ enum Outcome {
     Failed,
     Blocked,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InputActionState {
+    NotAttempted,
+    DriverAcknowledged,
+    EffectVerified,
+    EffectUnknown,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
