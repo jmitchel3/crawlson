@@ -308,7 +308,7 @@ impl UpdateBackend for GithubSignedBackend {
 
 pub fn run_manual(options: ManualUpgradeOptions) -> CommandResult {
     let backend = GithubSignedBackend::new();
-    run_manual_with_backend_lock(options, &backend, installation_ownership(), true)
+    run_manual_with_backend_lock(options, &backend, installation_ownership(), true, true)
 }
 
 #[cfg(test)]
@@ -317,7 +317,7 @@ fn run_manual_with_backend(
     backend: &dyn UpdateBackend,
     ownership: InstallOwnership,
 ) -> CommandResult {
-    run_manual_with_backend_lock(options, backend, ownership, false)
+    run_manual_with_backend_lock(options, backend, ownership, false, false)
 }
 
 fn run_manual_with_backend_lock(
@@ -325,9 +325,10 @@ fn run_manual_with_backend_lock(
     backend: &dyn UpdateBackend,
     ownership: InstallOwnership,
     lock_replacement: bool,
+    honor_environment_offline: bool,
 ) -> CommandResult {
     let current = Version::parse(VERSION).expect("Cargo package version is valid semver");
-    if options.offline || env_truthy("CRAWLSON_OFFLINE") {
+    if options.offline || (honor_environment_offline && env_truthy("CRAWLSON_OFFLINE")) {
         return render_upgrade(
             options.json,
             1,
