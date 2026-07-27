@@ -2147,7 +2147,25 @@ fn rename_create_only(source: &Path, destination: &Path) -> std::io::Result<()> 
 
 #[cfg(target_os = "windows")]
 fn rename_create_only(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(source, destination)
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn MoveFileW(existing: *const u16, new: *const u16) -> i32;
+    }
+    let mut source = source.as_os_str().encode_wide().collect::<Vec<_>>();
+    source.push(0);
+    let mut destination = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    destination.push(0);
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. MoveFileW
+    // rejects an existing destination and therefore supplies the no-replace
+    // behavior required for collection activation.
+    let result = unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(any(
