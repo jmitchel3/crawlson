@@ -23,8 +23,24 @@ const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 const OWNED_CONFIG: &[u8] =
     b"{\"headed\":false,\"noAutoDialog\":true,\"screenshotFormat\":\"png\"}\n";
 const READ_ONLY_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n";
+const FOLLOW_LINK_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\"]}\n";
 pub const VIEWPORT_WIDTH_CSS: f64 = 1280.0;
 pub const VIEWPORT_HEIGHT_CSS: f64 = 720.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverPolicyMode {
+    ReadOnly,
+    FollowLink,
+}
+
+impl DriverPolicyMode {
+    fn policy(self) -> &'static [u8] {
+        match self {
+            Self::ReadOnly => READ_ONLY_POLICY,
+            Self::FollowLink => FOLLOW_LINK_POLICY,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DriverCommandRecord {
@@ -71,6 +87,10 @@ pub enum DriverError {
     CommandFailed { capability: String, message: String },
     #[error("agent-browser blocked navigation: {0}")]
     NavigationBlocked(String),
+    #[error("agent-browser command '{capability}' required confirmation and was not executed")]
+    ConfirmationRequired { capability: String },
+    #[error("browser action effect is unknown after dispatch")]
+    ActionEffectUnknown(String),
     #[error("agent-browser protocol error for '{capability}': {message}")]
     Protocol { capability: String, message: String },
     #[error("agent-browser artifact error: {0}")]
@@ -86,6 +106,24 @@ pub trait BrowserDriver {
     fn current_url(&mut self) -> Result<Url, DriverError>;
     fn text(&mut self, selector: &str) -> Result<String, DriverError>;
     fn visible(&mut self, selector: &str) -> Result<bool, DriverError>;
+    fn enabled(&mut self, _selector: &str) -> Result<bool, DriverError> {
+        Err(DriverError::Protocol {
+            capability: "is_enabled".to_owned(),
+            message: "driver does not implement enabled-state inspection".to_owned(),
+        })
+    }
+    fn attribute(&mut self, _selector: &str, _name: &str) -> Result<Option<String>, DriverError> {
+        Err(DriverError::Protocol {
+            capability: "get_attribute".to_owned(),
+            message: "driver does not implement attribute inspection".to_owned(),
+        })
+    }
+    fn click(&mut self, _selector: &str) -> Result<(), DriverError> {
+        Err(DriverError::Protocol {
+            capability: "click".to_owned(),
+            message: "driver does not implement click".to_owned(),
+        })
+    }
     fn capture(&mut self, selector: &str, path: &Path) -> Result<CaptureBundle, DriverError>;
     fn diagnostics(&mut self) -> Result<DiagnosticsSummary, DriverError>;
     fn stop_trace(&mut self, path: &Path) -> Result<PathBuf, DriverError>;
@@ -100,6 +138,7 @@ pub struct AgentBrowserDriver {
     session: String,
     config_path: PathBuf,
     policy_path: PathBuf,
+    policy: &'static [u8],
     timeout: Duration,
     run_deadline: Instant,
     trace_started: bool,
@@ -115,6 +154,27 @@ impl AgentBrowserDriver {
         session: String,
         timeout: Duration,
         run_timeout: Duration,
+    ) -> Result<Self, DriverError> {
+        Self::new_with_policy_mode(
+            executable,
+            run_root,
+            origin,
+            session,
+            timeout,
+            run_timeout,
+            DriverPolicyMode::ReadOnly,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_mode(
+        executable: &Path,
+        run_root: &Path,
+        origin: Origin,
+        session: String,
+        timeout: Duration,
+        run_timeout: Duration,
+        policy_mode: DriverPolicyMode,
     ) -> Result<Self, DriverError> {
         if timeout.is_zero() || timeout >= Duration::from_secs(30) {
             return Err(DriverError::Io(
@@ -140,11 +200,14 @@ impl AgentBrowserDriver {
         let control = run_root.join("control");
         fs::create_dir_all(&control).map_err(|error| DriverError::Io(error.to_string()))?;
         let config_path = control.join("agent-browser.json");
-        let policy_path = control.join("read-only-policy.json");
+        let policy_path = control.join(match policy_mode {
+            DriverPolicyMode::ReadOnly => "read-only-policy.json",
+            DriverPolicyMode::FollowLink => "follow-link-policy.json",
+        });
+        let policy = policy_mode.policy();
         fs::write(&config_path, OWNED_CONFIG)
             .map_err(|error| DriverError::Io(error.to_string()))?;
-        fs::write(&policy_path, READ_ONLY_POLICY)
-            .map_err(|error| DriverError::Io(error.to_string()))?;
+        fs::write(&policy_path, policy).map_err(|error| DriverError::Io(error.to_string()))?;
 
         Ok(Self {
             executable,
@@ -153,6 +216,7 @@ impl AgentBrowserDriver {
             session,
             config_path,
             policy_path,
+            policy,
             timeout,
             run_deadline: Instant::now() + run_timeout,
             trace_started: false,
@@ -249,9 +313,8 @@ impl AgentBrowserDriver {
         });
         if confirmation_required {
             self.record(capability, start, Some(status), false, &stdout, &stderr);
-            return Err(DriverError::Protocol {
+            return Err(DriverError::ConfirmationRequired {
                 capability: capability.to_owned(),
-                message: "action required confirmation and was not executed".to_owned(),
             });
         }
         if status.success() != envelope.success {
@@ -378,7 +441,7 @@ impl AgentBrowserDriver {
 impl BrowserDriver for AgentBrowserDriver {
     fn prepare(&mut self) -> Result<(), DriverError> {
         if fs::read(&self.config_path).ok().as_deref() != Some(OWNED_CONFIG)
-            || fs::read(&self.policy_path).ok().as_deref() != Some(READ_ONLY_POLICY)
+            || fs::read(&self.policy_path).ok().as_deref() != Some(self.policy)
         {
             return Err(DriverError::Protocol {
                 capability: "launch_policy".to_owned(),
@@ -476,6 +539,35 @@ impl BrowserDriver for AgentBrowserDriver {
                 capability: "is_visible".to_owned(),
                 message: "response omitted visible boolean".to_owned(),
             })
+    }
+
+    fn enabled(&mut self, selector: &str) -> Result<bool, DriverError> {
+        let data = self.execute("is_enabled", &["is", "enabled", selector])?;
+        self.validate_response_origin("is_enabled", &data)?;
+        data.get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| DriverError::Protocol {
+                capability: "is_enabled".to_owned(),
+                message: "response omitted enabled boolean".to_owned(),
+            })
+    }
+
+    fn attribute(&mut self, selector: &str, name: &str) -> Result<Option<String>, DriverError> {
+        let data = self.execute("get_attribute", &["get", "attr", selector, name])?;
+        self.validate_response_origin("get_attribute", &data)?;
+        match data.get("value") {
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(Value::Null) => Ok(None),
+            _ => Err(DriverError::Protocol {
+                capability: "get_attribute".to_owned(),
+                message: "response omitted string-or-null attribute value".to_owned(),
+            }),
+        }
+    }
+
+    fn click(&mut self, selector: &str) -> Result<(), DriverError> {
+        let data = self.execute("click", &["click", selector])?;
+        validate_click_response(selector, &data)
     }
 
     fn capture(&mut self, selector: &str, path: &Path) -> Result<CaptureBundle, DriverError> {
@@ -787,6 +879,17 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn validate_click_response(selector: &str, data: &Value) -> Result<(), DriverError> {
+    if data.get("clicked").and_then(Value::as_str) == Some(selector) {
+        Ok(())
+    } else {
+        Err(DriverError::Protocol {
+            capability: "click".to_owned(),
+            message: "response did not acknowledge the requested selector".to_owned(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +899,90 @@ mod tests {
         assert!(valid_session("crawlson-ab12_cd"));
         assert!(!valid_session("default/session"));
         assert!(!valid_session(&"x".repeat(49)));
+    }
+
+    #[test]
+    fn read_only_policy_bytes_remain_stable() {
+        assert_eq!(
+            DriverPolicyMode::ReadOnly.policy(),
+            b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n"
+        );
+    }
+
+    #[test]
+    fn follow_link_policy_adds_only_required_capabilities() {
+        let read_only: Value = serde_json::from_slice(DriverPolicyMode::ReadOnly.policy()).unwrap();
+        let follow_link: Value =
+            serde_json::from_slice(DriverPolicyMode::FollowLink.policy()).unwrap();
+        let read_only = read_only["allow"].as_array().unwrap();
+        let follow_link = follow_link["allow"].as_array().unwrap();
+        let additions = follow_link
+            .iter()
+            .filter(|capability| !read_only.contains(capability))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            additions,
+            vec![
+                &Value::String("getattribute".to_owned()),
+                &Value::String("isenabled".to_owned()),
+                &Value::String("click".to_owned()),
+            ]
+        );
+        assert!(
+            read_only
+                .iter()
+                .all(|capability| follow_link.contains(capability))
+        );
+    }
+
+    #[test]
+    fn constructor_materializes_the_selected_policy_for_the_owned_run() {
+        let run = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let driver = AgentBrowserDriver::new_with_policy_mode(
+            &executable,
+            run.path(),
+            Origin::parse("http://127.0.0.1:4173").unwrap(),
+            "crawlson-policy-test".to_owned(),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DriverPolicyMode::FollowLink,
+        )
+        .unwrap();
+
+        assert_eq!(
+            driver.policy_path.file_name().unwrap().to_str().unwrap(),
+            "follow-link-policy.json"
+        );
+        assert_eq!(fs::read(driver.policy_path).unwrap(), FOLLOW_LINK_POLICY);
+    }
+
+    #[test]
+    fn action_effect_unknown_display_never_exposes_retained_detail() {
+        let error = DriverError::ActionEffectUnknown("sensitive upstream detail".to_owned());
+        assert_eq!(
+            error.to_string(),
+            "browser action effect is unknown after dispatch"
+        );
+    }
+
+    #[test]
+    fn click_acknowledgement_must_match_the_dispatched_selector_exactly() {
+        assert!(
+            validate_click_response("#continue", &serde_json::json!({"clicked": "#continue"}))
+                .is_ok()
+        );
+        for data in [
+            serde_json::json!({"clicked": "#other"}),
+            serde_json::json!({"clicked": null}),
+            serde_json::json!({}),
+        ] {
+            assert!(matches!(
+                validate_click_response("#continue", &data),
+                Err(DriverError::Protocol { capability, .. }) if capability == "click"
+            ));
+        }
     }
 
     #[test]

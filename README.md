@@ -67,7 +67,8 @@ The initial tool may include:
 The MVP core and CLI are written in Rust. `agent-browser` is the initial
 execution path, integrated through its supported process and JSON interface so
 the boundary remains replaceable. The first versioned journey and report
-contracts are deliberately narrow and read-only. See
+contracts are deliberately narrow: v1 and v2 are read-only, while v3 adds one
+explicitly authorized, deterministic same-origin link action. See
 [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
 for the runtime comparison, adapter lifecycle, safety ownership, and exact
 fallback criteria.
@@ -77,13 +78,14 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.5.1 CLI provides the first independently useful read-only vertical
-slice. It can run an explicitly authorized journey through `agent-browser`,
-retain raw evidence, render focused action images, and turn a completed run
-into either a verified guide or evidence-backed deterministic findings. The
-repository includes a credential-free demo of that complete loop and a
-non-publishing release path for validating bundles and managed installation.
-No public 0.5.1 release exists yet: license selection, namespace reservation,
+The Rust 0.6.0 CLI provides the first independently useful action-capable
+vertical slice. It can run an explicitly authorized journey through
+`agent-browser`, retain raw evidence, follow and verify a declared same-origin
+link, render focused action images, and turn a completed run into either a
+verified guide or evidence-backed deterministic findings. The repository
+includes a credential-free demo of that complete loop and a non-publishing
+release path for validating bundles and managed installation. No public 0.6.0
+release exists yet: license selection, namespace reservation,
 and production signing-key custody remain owner decisions. Autonomous agent
 exploration, authentication execution, mutations, and model-judged observations
 remain later vertical slices.
@@ -98,8 +100,11 @@ cargo build --locked --bins
 ./target/debug/crawlson upgrade --check
 ./target/debug/crawlson --json run examples/read-only-journey.toml \
   --allow-origin http://127.0.0.1:4173
+./target/debug/crawlson --json run examples/follow-link-pass.toml \
+  --allow-origin http://127.0.0.1:4173 \
+  --allow-action demo.follow-link-pass@1:follow-continue
 ./target/debug/crawlson render crawlson-runs/RUN_ID \
-  --journey examples/read-only-journey.toml
+  --journey examples/follow-link-pass.toml
 ```
 
 `crawlson` is the canonical executable. `clson` is a small launcher that
@@ -108,7 +113,7 @@ so `clson doctor` and `clson upgrade` have the same behavior.
 
 ### Release bundles and managed installation
 
-Crawlson 0.5.1 defines deterministic bundles for four targets: Apple Silicon
+Crawlson 0.6.0 defines deterministic bundles for four targets: Apple Silicon
 macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
 the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
 script and journey fixtures. The demo stays in the extracted bundle; managed
@@ -178,15 +183,18 @@ scripts/demo.sh \
   --output-dir ./crawlson-demo-output
 ```
 
-Both forms start the read-only loopback application and run three cases through
-the real browser adapter:
+Both forms start the loopback application and run six cases through the real
+browser adapter:
 
 - a passing journey that renders a Markdown guide;
-- an intentional visible-text failure that renders JSON and Markdown findings;
-  and
-- a missing-authorization attempt that is blocked before browser launch.
+- an intentional visible-text failure that renders JSON and Markdown findings,
+  plus a missing-target-authorization attempt blocked before browser launch;
+- a same-origin link action that is executed once, verified, and rendered as a
+  guide;
+- an action whose exact postcondition fails and is rendered as a finding; and
+- a missing-action-authorization attempt that is blocked before browser launch.
 
-The command exits successfully only when all three produce their expected
+The command exits successfully only when all six produce their expected
 outcomes. It prints the guide and findings paths and preserves the JSON reports,
 raw viewport screenshots, red-box/dimmed focused screenshots, focus metadata,
 browser traces, and command logs. It refuses a non-empty output directory so a
@@ -207,17 +215,21 @@ the documented demo, then uploads their reports, evidence, and logs even when a
 step fails. See the [demo contract](docs/architecture/demo-v1.md) for its safety
 and artifact guarantees.
 
-### Read-only journeys
+### Journeys and action authorization
 
-Journey v1 and v2 are strict TOML. Both support same-origin navigation, URL and visible
-text checkpoints, and target capture without activating the target. V2 adds
-explicit capture-to-checkpoint evidence associations and render-safe bounds.
-Start with
+Journey v1 and v2 are strict TOML. Both support same-origin navigation, URL and
+visible text checkpoints, and target capture without activating the target. V2
+adds explicit capture-to-checkpoint evidence associations and render-safe
+bounds. Journey v3 preserves those contracts and adds only `follow_link`: a
+visible, enabled link with a declared exact same-origin destination. Start with
 [`examples/read-only-journey.toml`](examples/read-only-journey.toml), its
 [`journey v2 JSON Schema`](schemas/journey-v2.schema.json), the preserved
 [`journey v1 JSON Schema`](schemas/journey-v1.schema.json), the
-[`run-report JSON Schema`](schemas/run-report-v1.schema.json), and the
-[`journey/report contract`](docs/architecture/journey-v1.md).
+[`follow-link example`](examples/follow-link-pass.toml), the
+[`journey v3 JSON Schema`](schemas/journey-v3.schema.json), the v1
+[`run-report JSON Schema`](schemas/run-report-v1.schema.json), the v2
+[`action run-report JSON Schema`](schemas/run-report-v2.schema.json), and the
+[`authorized-link contract`](docs/architecture/journey-v3.md).
 
 Every valid v1 journey contains at least one deterministic checkpoint and one
 focused capture. Visible-text checkpoints and capture targets must also pass a
@@ -231,6 +243,28 @@ normalizes scheme, hostname, and effective port, rejects unsafe documents
 before browser launch, and stops when an observed redirect leaves that origin.
 An authentication requirement is explicit `blocked` until a replaceable
 authentication adapter exists; it is never skipped or treated as passing.
+
+A v3 link declaration is not permission to execute it. Every `follow_link`
+step requires an exact runtime grant in the form
+`--allow-action JOURNEY@REVISION:STEP`. Crawlson binds the grant to the journey
+digest and target origin, then verifies the current origin, link visibility,
+enabled state, and exact credential-free destination before preserving the
+pre-action raw and focused evidence. It dispatches one click without retry and
+passes only after the observed URL exactly matches the declaration. An
+off-origin destination is blocked; an uncertain post-dispatch result is an
+error with an unknown action effect. Generic clicks, buttons, typing, form
+submission, scripts, uploads, authentication, and mutations remain
+unavailable as journey capabilities. Internally, the driver click is constrained
+to the declared CSS selector intersected with an anchor and its exact observed
+href. Following a link can still invoke application behavior, so an action grant
+must not be used as permission for a side-effecting production route.
+
+The pinned `agent-browser` network allowlist is hostname-based, not an
+exact-origin interceptor. Crawlson checks the full scheme, host, and port before
+and after each step and blocks an observed escape, but it cannot prove that a
+redirect did not transiently contact another port or scheme on the same host
+before returning. Use v3 only where that upstream limitation is acceptable;
+preventive exact-origin interception is a requirement for a future driver.
 
 Each run creates a unique directory beneath `crawlson-runs/` (or
 `--output-dir`) containing `report.json`, a required browser trace, and any
@@ -269,19 +303,19 @@ agent-browser envelope succeeded before capability-specific validation.
 `crawlson render RUN_DIRECTORY --journey JOURNEY` is an offline consumer of a
 completed run; `clson render` is identical. It launches no browser and accepts
 no arbitrary output location. The CLI-supplied run directory is the only file
-authority. Before writing, Crawlson strictly validates report v1, matches the
-exact journey digest/identity/revision/origin, checks the complete executed step
+authority. Before writing, Crawlson strictly validates report v1 or v2, matches
+the exact journey digest/identity/revision/origin, checks the complete executed step
 sequence, and rehashes every registered artifact. Symlinks, path escapes,
 missing evidence, source drift, focus-sidecar mismatches, incomplete cleanup,
 and contradictory outcomes fail closed.
 
 A final clean pass may produce `render/guide.md` plus deterministic local copies
-of its focused images, but only for passed `capture`
-steps that declare `guide_instruction` and have a verified raw/focused/sidecar
-evidence chain. The guide links the focus image with its red action-area box and
-dimmed surrounding page. Because read-only journey v1 observes but never clicks
-or types, the authored instruction is labeled as the reader's next action; the
-guide does not claim Crawlson executed it.
+of its focused images, but only for passed `capture` or `follow_link` steps that
+declare `guide_instruction` and have a verified raw/focused/sidecar evidence
+chain. The guide links the focus image with its vivid red action-area box and
+dimmed near-black surrounding page. Read-only captures are labeled as the
+reader's next action. A link step is described as executed only when its one
+click and exact post-action URL were both verified.
 
 A final deterministic checkpoint failure produces `render/findings.json` and
 `render/findings.md`. Each finding is `untriaged` rather than assigning invented
@@ -297,7 +331,8 @@ output is preserved and rejected. Guide-ready exits 0, findings-ready exits 1,
 usage exits 2, valid non-publishable runs exit 3, and invalid/incomplete render
 inputs exit 4. See the published
 [`render report`](schemas/render-report-v1.schema.json),
-[`findings`](schemas/findings-v1.schema.json), and
+[`findings v1`](schemas/findings-v1.schema.json),
+[`action findings v2`](schemas/findings-v2.schema.json), and
 [`render contract`](docs/architecture/render-v1.md).
 
 Artifact hashing establishes consistency with the local run report, not

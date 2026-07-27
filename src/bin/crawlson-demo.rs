@@ -58,7 +58,7 @@ const PAGE: &str = r#"<!doctype html>
       font-size: 19px;
       line-height: 1.6;
     }
-    #action-button {
+    .action-button {
       display: inline-flex;
       min-height: 54px;
       align-items: center;
@@ -73,6 +73,11 @@ const PAGE: &str = r#"<!doctype html>
       font-size: 18px;
       font-weight: 750;
       cursor: default;
+      text-decoration: none;
+    }
+    #redirect-button {
+      margin-left: 12px;
+      background: #59647a;
     }
   </style>
 </head>
@@ -81,7 +86,66 @@ const PAGE: &str = r#"<!doctype html>
     <p class="eyebrow">Safe local fixture</p>
     <h1 id="welcome-heading">Welcome to the Crawlson demo</h1>
     <p id="journey-status">This read-only page proves the complete journey, evidence, finding, and guide loop without credentials or third-party services.</p>
-    <button id="action-button" type="button">Continue</button>
+    <a class="action-button" id="action-button" href="/complete">Continue</a>
+    <a class="action-button" id="redirect-button" href="/redirect">Broken redirect fixture</a>
+  </main>
+</body>
+</html>
+"#;
+
+const COMPLETE_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crawlson demo complete</title>
+  <style>
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f4f7fb;
+      color: #172033;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(760px, calc(100% - 48px));
+      margin: 72px auto;
+      padding: 56px;
+      border: 1px solid #dce3ee;
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 18px 50px rgb(32 49 78 / 12%);
+    }
+    .eyebrow {
+      margin: 0 0 12px;
+      color: #365b96;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 52px);
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+    }
+    #completion-status {
+      max-width: 590px;
+      margin: 24px 0 0;
+      color: #52617a;
+      font-size: 19px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <main aria-labelledby="completion-heading">
+    <p class="eyebrow">Verified destination</p>
+    <h1 id="completion-heading">Journey complete</h1>
+    <p id="completion-status">The same-origin Continue link reached its deterministic destination.</p>
   </main>
 </body>
 </html>
@@ -228,6 +292,7 @@ struct Response {
     body: &'static [u8],
     include_body: bool,
     allow: Option<&'static str>,
+    location: Option<&'static str>,
 }
 
 impl Response {
@@ -239,6 +304,7 @@ impl Response {
             body: b"",
             include_body: false,
             allow: None,
+            location: None,
         }
     }
 }
@@ -273,6 +339,34 @@ fn route(request: &[u8]) -> Response {
             body: PAGE.as_bytes(),
             include_body: method == "GET",
             allow: None,
+            location: None,
+        },
+        "/complete" => Response {
+            status: 200,
+            reason: "OK",
+            media_type: "text/html; charset=utf-8",
+            body: COMPLETE_PAGE.as_bytes(),
+            include_body: method == "GET",
+            allow: None,
+            location: None,
+        },
+        "/redirect" => Response {
+            status: 302,
+            reason: "Found",
+            media_type: "text/plain; charset=utf-8",
+            body: b"",
+            include_body: false,
+            allow: None,
+            location: Some("/unexpected"),
+        },
+        "/unexpected" => Response {
+            status: 200,
+            reason: "OK",
+            media_type: "text/html; charset=utf-8",
+            body: COMPLETE_PAGE.as_bytes(),
+            include_body: method == "GET",
+            allow: None,
+            location: None,
         },
         "/healthz" => Response {
             status: 200,
@@ -281,6 +375,7 @@ fn route(request: &[u8]) -> Response {
             body: b"ready\n",
             include_body: method == "GET",
             allow: None,
+            location: None,
         },
         "/favicon.ico" => Response::empty(204, "No Content"),
         _ => Response::empty(404, "Not Found"),
@@ -291,13 +386,17 @@ fn write_response(stream: &mut TcpStream, response: Response) -> Result<(), Stri
     let allow = response
         .allow
         .map_or_else(String::new, |value| format!("Allow: {value}\r\n"));
+    let location = response
+        .location
+        .map_or_else(String::new, |value| format!("Location: {value}\r\n"));
     let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Cache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}Cache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         response.status,
         response.reason,
         response.media_type,
         response.body.len(),
         allow,
+        location,
     );
     stream
         .write_all(headers.as_bytes())
@@ -332,6 +431,30 @@ mod tests {
                 .unwrap()
                 .contains("id=\"action-button\"")
         );
+        assert!(
+            std::str::from_utf8(page.body)
+                .unwrap()
+                .contains("href=\"/complete\">Continue</a>")
+        );
+        assert!(
+            std::str::from_utf8(page.body)
+                .unwrap()
+                .contains("id=\"redirect-button\" href=\"/redirect\"")
+        );
+
+        let complete = route(b"GET /complete?source=demo HTTP/1.1\r\nHost: example\r\n\r\n");
+        assert_eq!(complete.status, 200);
+        assert!(complete.include_body);
+        let complete_body = std::str::from_utf8(complete.body).unwrap();
+        assert!(complete_body.contains("id=\"completion-heading\">Journey complete</h1>"));
+        assert!(complete_body.contains(
+            "id=\"completion-status\">The same-origin Continue link reached its deterministic destination.</p>"
+        ));
+
+        let redirect = route(b"GET /redirect HTTP/1.1\r\nHost: example\r\n\r\n");
+        assert_eq!(redirect.status, 302);
+        assert_eq!(redirect.location, Some("/unexpected"));
+        assert_eq!(route(b"GET /unexpected HTTP/1.1\r\n\r\n").status, 200);
 
         let head = route(b"HEAD /healthz HTTP/1.1\r\n\r\n");
         assert_eq!(head.status, 200);

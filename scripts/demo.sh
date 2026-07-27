@@ -220,6 +220,32 @@ expect_exit 3 "$output_dir/blocked-run.json" "$output_dir/blocked-run.stderr" \
   "$crawlson_bin" --json run "$repo_root/examples/demo-pass.toml" \
   --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
+expect_exit 0 "$output_dir/action-pass-run.json" "$output_dir/action-pass-run.stderr" \
+  "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
+  --allow-origin "$origin" \
+  --allow-action "demo.follow-link-pass@1:follow-continue" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+action_pass_run_dir="$(json_string run_directory "$output_dir/action-pass-run.json")"
+[[ -n "$action_pass_run_dir" ]] || fail "action report omitted its run directory"
+expect_exit 0 "$output_dir/action-pass-render.json" "$output_dir/action-pass-render.stderr" \
+  "$crawlson_bin" --json render "$action_pass_run_dir" \
+  --journey "$repo_root/examples/follow-link-pass.toml"
+
+expect_exit 1 "$output_dir/action-fail-run.json" "$output_dir/action-fail-run.stderr" \
+  "$crawlson_bin" --json run "$repo_root/examples/follow-link-fail.toml" \
+  --allow-origin "$origin" \
+  --allow-action "demo.follow-link-fail@1:follow-broken-redirect" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+action_fail_run_dir="$(json_string run_directory "$output_dir/action-fail-run.json")"
+[[ -n "$action_fail_run_dir" ]] || fail "failing action report omitted its run directory"
+expect_exit 1 "$output_dir/action-fail-render.json" "$output_dir/action-fail-render.stderr" \
+  "$crawlson_bin" --json render "$action_fail_run_dir" \
+  --journey "$repo_root/examples/follow-link-fail.toml"
+
+expect_exit 3 "$output_dir/action-blocked-run.json" "$output_dir/action-blocked-run.stderr" \
+  "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
+  --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
+
 require_json_fragment "$output_dir/pass-run.json" '"outcome":"passed"' \
   "passing journey outcome"
 require_json_fragment "$output_dir/pass-run.json" '"execution_outcome":"passed"' \
@@ -251,6 +277,30 @@ require_json_fragment "$output_dir/blocked-run.json" \
 require_json_fragment "$output_dir/blocked-run.json" '"artifacts":[]' \
   "blocked run empty artifact list"
 
+require_json_fragment "$output_dir/action-pass-run.json" '"schema_version":2' \
+  "action run report version"
+require_json_fragment "$output_dir/action-pass-run.json" '"action_state":"effect_verified"' \
+  "verified link action state"
+require_json_fragment "$output_dir/action-pass-render.json" '"status":"guide_ready"' \
+  "action guide status"
+require_json_fragment "$output_dir/action-fail-run.json" '"outcome":"failed"' \
+  "post-action mismatch outcome"
+require_json_fragment "$output_dir/action-fail-run.json" \
+  '"id":"follow-broken-redirect"' "post-action mismatch step"
+require_json_fragment "$output_dir/action-fail-run.json" \
+  '"action_state":"driver_acknowledged"' "post-action acknowledged state"
+require_json_fragment "$output_dir/action-fail-run.json" \
+  '"observed_url":"http://127.0.0.1:4173/unexpected"' \
+  "post-action observed destination"
+require_json_fragment "$output_dir/action-fail-render.json" '"status":"findings_ready"' \
+  "post-action findings status"
+require_json_fragment "$output_dir/action-blocked-run.json" \
+  '"reason":{"code":"action_authorization_mismatch"' \
+  "missing action authorization reason"
+require_json_fragment "$output_dir/action-blocked-run.json" \
+  '"driver":{"name":"agent-browser","commands":[]}' \
+  "action preflight empty driver command list"
+
 for run_dir in "$pass_run_dir" "$fail_run_dir"; do
   require_artifact "$run_dir/report.json"
   require_artifact "$run_dir/evidence/trace.json"
@@ -270,6 +320,20 @@ require_json_fragment "$pass_run_dir/render/guide.md" '](001-focused.png)' \
   "passing guide local image link"
 require_json_fragment "$fail_run_dir/render/findings.md" \
   '../evidence/003-capture-action.focused.png' "finding focused-evidence link"
+
+require_artifact "$action_pass_run_dir/evidence/002-follow-continue.raw.png"
+require_artifact "$action_pass_run_dir/evidence/002-follow-continue.focused.png"
+require_artifact "$action_pass_run_dir/evidence/002-follow-continue.focused.json"
+require_artifact "$action_pass_run_dir/render/guide.md"
+require_json_fragment "$action_pass_run_dir/render/guide.md" \
+  'executed this highlighted link action once' "executed-action guide claim"
+require_artifact "$action_fail_run_dir/render/findings.json"
+require_artifact "$action_fail_run_dir/render/findings.md"
+require_artifact "$action_fail_run_dir/evidence/003-follow-broken-redirect.raw.png"
+require_artifact "$action_fail_run_dir/evidence/003-follow-broken-redirect.focused.png"
+require_artifact "$action_fail_run_dir/evidence/003-follow-broken-redirect.focused.json"
+require_json_fragment "$action_fail_run_dir/render/findings.md" \
+  'Observed: path /unexpected' "post-action observed path finding"
 
 echo "Crawlson demo passed."
 echo "Artifacts: $output_dir"

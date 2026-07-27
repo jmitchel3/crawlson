@@ -1,0 +1,32 @@
+schema_version = 3
+
+[journey]
+id = "demo.follow-link-fail"
+revision = 1
+title = "Expose a broken link destination"
+purpose = "Prove that an authorized link action can retain evidence when the browser reaches the wrong same-origin destination."
+expected_outcome = "The redirect fixture link reaches its declared destination instead of the intentionally wrong redirect target."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-demo"
+title = "Open the local demo"
+action = { type = "navigate", path = "/" }
+
+[[steps]]
+id = "confirm-home"
+title = "Confirm the start page"
+action = { type = "check_text", selector = "#welcome-heading", expected = "Welcome to the Crawlson demo", comparison = "exact" }
+
+[[steps]]
+id = "follow-broken-redirect"
+title = "Follow the broken redirect fixture"
+guide_instruction = "Select the highlighted broken redirect fixture link."
+action = { type = "follow_link", selector = "#redirect-button", expected_path = "/redirect", alt_text = "Broken redirect fixture link highlighted in red" }

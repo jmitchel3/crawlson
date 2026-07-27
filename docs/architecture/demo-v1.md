@@ -1,6 +1,7 @@
 # Self-contained demo contract
 
-Status: implemented in Crawlson 0.4.0.
+Status: implemented in Crawlson 0.4.0 and extended with authorized link actions
+in Crawlson 0.6.0.
 
 The demo proves the smallest independently useful Crawlson product loop without
 an external application, credentials, or private fixtures:
@@ -14,13 +15,17 @@ for the demo and for an authorized external target.
 
 ## Components
 
-- `crawlson-demo` serves one stable visible page.
+- `crawlson-demo` serves stable start and completion pages.
 - `examples/demo-pass.toml` verifies the visible heading and captures the
   Continue action for a guide.
 - `examples/demo-fail.toml` declares an intentionally wrong heading and links a
   later focused capture to that checkpoint as finding evidence.
-- `scripts/demo.sh` coordinates the server, both journeys, rendering, and a
-  missing-authorization safety check.
+- `examples/follow-link-pass.toml` executes the Continue link once and verifies
+  its exact destination before rendering an executed guide step.
+- `examples/follow-link-fail.toml` follows a same-origin redirect fixture and
+  turns its acknowledged wrong final URL into a link-postcondition finding.
+- `scripts/demo.sh` coordinates the server, all four journeys, rendering, and
+  missing target- and action-authorization safety checks.
 - `tests/real_agent_browser.rs` independently validates the full artifact and
   report contract through a real supported browser driver.
 
@@ -38,9 +43,11 @@ headers disable caching and cross-origin or embedded execution paths appropriate
 for this fixture.
 
 The server does not authorize Crawlson. Every run must still provide the exact
-normalized origin through `--allow-origin`. Omitting it produces exit 3 and a
-`blocked` report before `agent-browser` starts. This makes the safety behavior
-part of the demonstration rather than a test-only assertion.
+normalized origin through `--allow-origin`, and every link action additionally
+requires its exact `--allow-action JOURNEY@REVISION:STEP` grant. Omitting either
+produces exit 3 and a `blocked` report before `agent-browser` starts. This makes
+the safety behavior part of the demonstration rather than a test-only
+assertion.
 
 The shell command accepts only an absent or empty output directory and never
 deletes old runs. It terminates only the `crawlson-demo` process it started,
@@ -51,13 +58,16 @@ cleanup trap disabled.
 
 ## Expected outcomes and artifacts
 
-The passing journey exits 0 and renders `render/guide.md` with a local focused
-image. The failing journey exits 1 and renders `render/findings.json` and
-`render/findings.md`. The unauthorized journey exits 3, reports `blocked`, and
-has neither browser commands nor fabricated evidence. The coordinating script
-validates those JSON outcomes, failure and block reason codes, successful
-cleanup, the blocked run's empty command and artifact lists, and the required
-evidence files. It exits 0 only when all checks match the contract.
+The read-only and action passing journeys exit 0 and render `render/guide.md`
+with local focused images. Their intentional failures exit 1 and render
+`render/findings.json` and `render/findings.md`. The two unauthorized journeys
+exit 3, report `blocked`, and have neither browser commands nor fabricated
+evidence. The action pass additionally proves `effect_verified`; its guide may
+therefore say Crawlson executed the highlighted link exactly once. The
+coordinating script validates those JSON outcomes, failure and block reason
+codes, successful cleanup, the blocked runs' empty command lists, and the
+required evidence files. It exits 0 only when all six outcomes match the
+contract.
 
 Each executed browser run preserves `report.json`, a trace, a raw viewport PNG,
 a focused PNG, and focus metadata. The focused image keeps the selected action
@@ -69,7 +79,8 @@ finding derivative, not a redaction.
 The real-browser integration rehashes every registered artifact, decodes the
 raw and focused PNGs, checks the exact outline color, checks that the action
 interior is unchanged, checks that surrounding pixels are dimmed, validates the
-guide's local image, and verifies deterministic finding provenance.
+guide's local image, verifies deterministic finding provenance, and confirms
+the real driver executed one link click and observed the exact destination.
 
 ## CI contract
 

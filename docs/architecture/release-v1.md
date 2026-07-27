@@ -1,7 +1,7 @@
 # Release and managed-install contract v1
 
-Status: defined for Crawlson 0.5.1. The repository can exercise this contract
-with non-publishing dry-run artifacts, but no public 0.5.1 release exists yet.
+Status: defined for Crawlson 0.6.0. The repository can exercise this contract
+with non-publishing dry-run artifacts, but no public 0.6.0 release exists yet.
 
 ## Purpose and boundaries
 
@@ -62,6 +62,8 @@ crawlson-vVERSION-TARGET/
   examples/
     demo-pass.toml
     demo-fail.toml
+    follow-link-pass.toml
+    follow-link-fail.toml
   scripts/
     demo.sh
 ```
@@ -204,16 +206,20 @@ binary overrides are an inseparable pair, must name executable files, and skip
 the source `cargo build`. All existing target authorization and nonempty-output
 guards remain in force.
 
-The proof requires the passing, intentional visible failure, and blocked
-missing-authorization outcomes. It verifies the run reports, trace, raw
-screenshot, focused screenshot, focus metadata, guide, and findings. The
-focused evidence must retain the vivid red action outline and dimmed surrounding
-page; merely producing a PNG is not sufficient.
+The proof requires a passing read-only observation, an intentional visible
+failure, a blocked missing-origin grant, a verified same-origin link action, an
+intentional post-action mismatch, and a blocked missing-action grant. It
+verifies the run reports, trace, raw screenshot, focused screenshot, focus
+metadata, guide, and findings. The focused evidence must retain the vivid red
+action outline and dimmed surrounding page; merely producing a PNG is not
+sufficient.
 
 ## Non-publishing dry run
 
-The release dry run builds, packages, installs, and exercises all four native
-targets but cannot publish. Its workflow and token use read-only repository
+The release dry run builds, packages, installs, and exercises bundle HTTP
+startup on all four native targets but cannot publish. The complete packaged
+six-outcome real-browser demo remains a required release proof and is not yet a
+cross-target dry-run gate. Its workflow and token use read-only repository
 permissions. It has no release, tag, package, attestation, deployment, or
 external-registry write step and receives no production signing secret.
 
@@ -227,8 +233,9 @@ than promote dry-run output.
 Dry-run verification must fail on a missing target, alias mismatch, raw/bundled
 payload mismatch, modified fixture, unsafe archive entry, bad digest or test
 signature, incomplete receipt, wrong-target install, partial replacement,
-rollback failure, or packaged-demo failure. Passing the dry run proves that a
-clean installed bundle works, but it does not satisfy the public MVP install
+rollback failure, or packaged-server startup failure. Passing the current dry
+run proves that clean managed binaries and the packaged server work; it does not
+yet prove the complete packaged browser demo or satisfy the public MVP install
 criterion.
 
 ## Owner-gated production follow-up

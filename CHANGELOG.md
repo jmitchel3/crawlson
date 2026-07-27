@@ -6,6 +6,30 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-27
+
+### Added
+
+- Journey schema v3 and run-report schema v2 for explicitly authorized,
+  deterministic same-origin link actions with pre-action focused evidence and
+  exact post-action URL verification.
+- Per-step `--allow-action JOURNEY@REVISION:STEP` grants, a minimal dynamic
+  `agent-browser` action policy, and honest unattempted, acknowledged, verified,
+  and unknown action states.
+- A two-page loopback demo proving that a generated guide can describe a link
+  action Crawlson actually executed and verified.
+- Findings that distinguish invisible, disabled, invalid, mismatched-href, and
+  acknowledged wrong-destination link failures.
+
+### Security
+
+- Generic click, form input, authentication, script execution, uploads, and
+  arbitrary mutation remain unavailable. Link actions are preflighted for a
+  visible, enabled target and an exact credential-free same-origin destination,
+  dispatched once through an anchor-and-exact-href-constrained selector, and
+  never retried after an uncertain result. Malformed grants are rejected without
+  retaining or echoing their contents.
+
 ## [0.5.1] - 2026-07-27
 
 ### Fixed

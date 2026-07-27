@@ -1,0 +1,43 @@
+schema_version = 3
+
+[journey]
+id = "demo.follow-link-pass"
+revision = 1
+title = "Follow the demo Continue link"
+purpose = "Prove that an explicitly authorized same-origin link reaches and verifies its declared destination."
+expected_outcome = "The Continue link opens the deterministic completion page."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-demo"
+title = "Open the local demo"
+action = { type = "navigate", path = "/" }
+
+[[steps]]
+id = "follow-continue"
+title = "Follow the Continue link"
+guide_instruction = "Select the highlighted Continue link."
+action = { type = "follow_link", selector = "#action-button", expected_path = "/complete", alt_text = "Continue link highlighted in red" }
+
+[[steps]]
+id = "confirm-destination"
+title = "Confirm the destination location"
+action = { type = "check_url", path = "/complete" }
+
+[[steps]]
+id = "confirm-completion"
+title = "Confirm the completion message"
+action = { type = "check_text", selector = "#completion-heading", expected = "Journey complete", comparison = "exact" }
+
+[[steps]]
+id = "capture-completion"
+title = "Capture the verified completion message"
+evidence_for = ["confirm-completion"]
+action = { type = "capture", selector = "#completion-heading", alt_text = "Verified completion message highlighted in red" }

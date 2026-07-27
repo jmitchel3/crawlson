@@ -138,7 +138,12 @@ fn package_impl(
         let source = options.bin_dir.join(&file_name);
         insert_source(&mut files, format!("bin/{file_name}"), &source, 0o755)?;
     }
-    for name in ["demo-fail.toml", "demo-pass.toml"] {
+    for name in [
+        "demo-fail.toml",
+        "demo-pass.toml",
+        "follow-link-fail.toml",
+        "follow-link-pass.toml",
+    ] {
         let source = options.source_dir.join("examples").join(name);
         insert_source(&mut files, format!("examples/{name}"), &source, 0o644)?;
     }
@@ -1350,6 +1355,8 @@ mod tests {
             assert!(members.contains_key("README.md"));
             assert!(members.contains_key("examples/demo-pass.toml"));
             assert!(members.contains_key("examples/demo-fail.toml"));
+            assert!(members.contains_key("examples/follow-link-pass.toml"));
+            assert!(members.contains_key("examples/follow-link-fail.toml"));
             assert!(members.contains_key("scripts/demo.sh"));
         }
     }
@@ -1620,6 +1627,16 @@ mod tests {
         }
         fs::write(source.join("examples/demo-pass.toml"), b"pass = true\n").unwrap();
         fs::write(source.join("examples/demo-fail.toml"), b"pass = false\n").unwrap();
+        fs::write(
+            source.join("examples/follow-link-pass.toml"),
+            b"pass_action = true\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("examples/follow-link-fail.toml"),
+            b"pass_action = false\n",
+        )
+        .unwrap();
         fs::write(
             source.join("scripts/demo.sh"),
             b"#!/usr/bin/env bash\nexit 0\n",

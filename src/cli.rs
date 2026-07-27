@@ -41,7 +41,7 @@ enum Commands {
     /// Install a verified release bundle without elevating privileges.
     Install(InstallArgs),
 
-    /// Run one validated, explicitly authorized read-only journey.
+    /// Run one validated journey with explicit target and action authorization.
     Run(RunArgs),
 
     /// Render findings or a guide from one completed, verified run.
@@ -90,6 +90,10 @@ struct RunArgs {
     /// Exact HTTP(S) origin authorized for this run.
     #[arg(long, value_name = "ORIGIN")]
     allow_origin: Option<String>,
+
+    /// Authorize one exact interactive step as JOURNEY@REVISION:STEP.
+    #[arg(long, value_name = "JOURNEY@REVISION:STEP")]
+    allow_action: Vec<String>,
 
     /// Parent directory beneath which a unique run directory is created.
     #[arg(long, value_name = "DIRECTORY", default_value = "crawlson-runs")]
@@ -183,6 +187,7 @@ where
             let report = runner::run(RunOptions {
                 journey_path: args.journey,
                 allowed_origin: args.allow_origin,
+                allowed_actions: args.allow_action,
                 output_directory: args.output_dir,
                 agent_browser: args.agent_browser,
                 action_timeout: std::time::Duration::from_secs(args.action_timeout_seconds),
