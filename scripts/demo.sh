@@ -8,6 +8,9 @@ agent_browser="agent-browser"
 crawlson_bin=""
 demo_bin=""
 demo_pid=""
+auth_state_dir=""
+auth_state_path=""
+auth_state_scan_path=""
 cleanup_started=0
 
 fail() {
@@ -15,11 +18,28 @@ fail() {
   exit 1
 }
 
+remove_auth_state() {
+  local failed=0
+  if [[ -n "$auth_state_path" && -e "$auth_state_path" ]]; then
+    rm -f "$auth_state_path" 2>/dev/null || failed=1
+  fi
+  if [[ -n "$auth_state_dir" && -d "$auth_state_dir" ]]; then
+    rmdir "$auth_state_dir" 2>/dev/null || failed=1
+  fi
+  if [[ "$failed" -ne 0 ]]; then
+    return 1
+  fi
+  auth_state_path=""
+  auth_state_dir=""
+}
+
 cleanup() {
   if [[ "$cleanup_started" -eq 1 ]]; then
     return
   fi
   cleanup_started=1
+  remove_auth_state \
+    || echo "crawlson demo: could not remove private authentication state" >&2
   if [[ -n "$demo_pid" ]] && kill -0 "$demo_pid" 2>/dev/null; then
     kill -TERM "$demo_pid" 2>/dev/null || true
     for _ in {1..100}; do
@@ -78,6 +98,20 @@ require_json_fragment() {
 require_artifact() {
   local path="$1"
   [[ -s "$path" ]] || fail "required artifact is missing or empty: $path"
+}
+
+require_private_value_absent() {
+  local value="$1"
+  [[ -n "$value" ]] || fail "privacy scan sentinel was missing"
+  set +e
+  grep -R -a -F "$value" "$output_dir" >/dev/null 2>&1
+  local status=$?
+  set -e
+  case "$status" in
+    0) fail "private authentication material leaked into retained demo output" ;;
+    1) ;;
+    *) fail "could not complete retained-output privacy scan" ;;
+  esac
 }
 
 resolve_executable() {
@@ -197,6 +231,14 @@ done
 origin="$(json_string origin "$output_dir/demo-ready.json")"
 [[ "$origin" == "http://127.0.0.1:4173" ]] || fail "demo server emitted an unexpected origin"
 
+auth_storage_value="crawlson-demo-fixture-$demo_pid"
+auth_state_dir="$(mktemp -d "${TMPDIR:-/tmp}/crawlson-auth-demo.XXXXXX")"
+chmod 700 "$auth_state_dir"
+auth_state_path="$auth_state_dir/state.json"
+auth_state_scan_path="$auth_state_path"
+printf '%s\n' "{\"cookies\":[],\"origins\":[{\"origin\":\"$origin\",\"localStorage\":[{\"name\":\"crawlson_demo_session\",\"value\":\"$auth_storage_value\"}]}]}" >"$auth_state_path"
+chmod 600 "$auth_state_path"
+
 runs_dir="$output_dir/runs"
 expect_exit 0 "$output_dir/pass-run.json" "$output_dir/pass-run.stderr" \
   "$crawlson_bin" --json run "$repo_root/examples/demo-pass.toml" \
@@ -246,12 +288,28 @@ expect_exit 3 "$output_dir/action-blocked-run.json" "$output_dir/action-blocked-
   "$crawlson_bin" --json run "$repo_root/examples/follow-link-pass.toml" \
   --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
 
+expect_exit 0 "$output_dir/auth-pass-run.json" "$output_dir/auth-pass-run.stderr" \
+  "$crawlson_bin" --json run "$repo_root/examples/authenticated-pass.toml" \
+  --allow-origin "$origin" --auth-state "$auth_state_path" \
+  --output-dir "$runs_dir" --agent-browser "$agent_browser"
+auth_pass_run_dir="$(json_string run_directory "$output_dir/auth-pass-run.json")"
+[[ -n "$auth_pass_run_dir" ]] || fail "authenticated report omitted its run directory"
+expect_exit 0 "$output_dir/auth-pass-render.json" "$output_dir/auth-pass-render.stderr" \
+  "$crawlson_bin" --json render "$auth_pass_run_dir" \
+  --journey "$repo_root/examples/authenticated-pass.toml"
+expect_exit 3 "$output_dir/auth-blocked-run.json" "$output_dir/auth-blocked-run.stderr" \
+  "$crawlson_bin" --json run "$repo_root/examples/authenticated-pass.toml" \
+  --allow-origin "$origin" --output-dir "$runs_dir" --agent-browser "$agent_browser"
+
+remove_auth_state || fail "could not remove private authentication state"
+
 journeys_dir="$output_dir/journeys"
 mkdir -p "$journeys_dir"
 cp "$repo_root/examples/demo-pass.toml" "$journeys_dir/demo-pass.toml"
 cp "$repo_root/examples/demo-fail.toml" "$journeys_dir/demo-fail.toml"
 cp "$repo_root/examples/follow-link-pass.toml" "$journeys_dir/follow-link-pass.toml"
 cp "$repo_root/examples/follow-link-fail.toml" "$journeys_dir/follow-link-fail.toml"
+cp "$repo_root/examples/authenticated-pass.toml" "$journeys_dir/authenticated-pass.toml"
 
 cat >"$output_dir/guide-collection.toml" <<EOF
 schema_version = 1
@@ -279,6 +337,12 @@ key = "follow-continue"
 order = 20
 run = "runs/$(basename "$action_pass_run_dir")"
 journey = "journeys/follow-link-pass.toml"
+
+[[topics.guides]]
+key = "authenticated-viewer"
+order = 30
+run = "runs/$(basename "$auth_pass_run_dir")"
+journey = "journeys/authenticated-pass.toml"
 EOF
 
 expect_exit 0 "$output_dir/collection-build.json" "$output_dir/collection-build.stderr" \
@@ -377,9 +441,21 @@ require_json_fragment "$output_dir/action-blocked-run.json" \
 require_json_fragment "$output_dir/action-blocked-run.json" \
   '"driver":{"name":"agent-browser","commands":[]}' \
   "action preflight empty driver command list"
+require_json_fragment "$output_dir/auth-pass-run.json" '"schema_version":3' \
+  "authenticated run report version"
+require_json_fragment "$output_dir/auth-pass-run.json" '"status":"verified"' \
+  "authenticated verification status"
+require_json_fragment "$output_dir/auth-pass-render.json" '"status":"guide_ready"' \
+  "authenticated guide status"
+require_json_fragment "$output_dir/auth-blocked-run.json" \
+  '"reason":{"code":"authentication_state_missing"' \
+  "missing authentication state reason"
+require_json_fragment "$output_dir/auth-blocked-run.json" \
+  '"driver":{"name":"agent-browser","commands":[]}' \
+  "authentication preflight empty driver command list"
 require_json_fragment "$output_dir/collection-build.json" '"status":"ready"' \
   "guide collection build status"
-require_json_fragment "$output_dir/collection-build.json" '"guides":2' \
+require_json_fragment "$output_dir/collection-build.json" '"guides":3' \
   "guide collection guide count"
 cmp -s "$output_dir/collection-build.json" "$output_dir/collection-check.json" \
   || fail "guide collection build and check reports differ"
@@ -424,12 +500,22 @@ require_artifact "$action_fail_run_dir/evidence/003-follow-broken-redirect.focus
 require_json_fragment "$action_fail_run_dir/render/findings.md" \
   'Observed: path /unexpected' "post-action observed path finding"
 
+require_artifact "$auth_pass_run_dir/evidence/003-capture-viewer-access.raw.png"
+require_artifact "$auth_pass_run_dir/evidence/003-capture-viewer-access.focused.png"
+require_artifact "$auth_pass_run_dir/evidence/003-capture-viewer-access.focused.json"
+require_artifact "$auth_pass_run_dir/render/guide.md"
+
 require_artifact "$output_dir/guide-site/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/review-continue/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/review-continue/001-focused.png"
 require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/index.md"
 require_artifact "$output_dir/guide-site/topics/getting-started/follow-continue/001-focused.png"
+require_artifact "$output_dir/guide-site/topics/getting-started/authenticated-viewer/index.md"
+require_artifact "$output_dir/guide-site/topics/getting-started/authenticated-viewer/001-focused.png"
+
+require_private_value_absent "$auth_storage_value"
+require_private_value_absent "$auth_state_scan_path"
 cmp -s "$pass_run_dir/evidence/003-capture-action.focused.png" \
   "$output_dir/guide-site/topics/getting-started/review-continue/001-focused.png" \
   || fail "collection guide image does not match verified focused evidence"

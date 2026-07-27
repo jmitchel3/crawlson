@@ -6,6 +6,32 @@ breaking product behavior increments the minor version.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-27
+
+### Added
+
+- Journey v4 and run-report v3 contracts for an external,
+  `agent-browser`-compatible state-file provider with a public role and required
+  visible authentication checkpoint.
+- `crawlson run --auth-state PATH` and equivalent `clson` support with distinct
+  missing, unsupported, invalid, load-failed, blocked, and verified outcomes.
+- A disposable authenticated loopback route, real-browser journey, focused
+  screenshot, rendered guide, guide-collection entry, and packaged demo fixture.
+
+### Security
+
+- Authentication state is bounded, structurally validated, restricted to
+  exact-origin browser storage, read from a regular non-symlink source, copied
+  to a private neutral temporary path, loaded once, and deleted immediately.
+- Cookie entries fail closed because the pinned driver's hostname-only network
+  allowlist cannot contain port-agnostic cookies to the authorized exact origin.
+- State paths, contents, file metadata, and path-echoing driver output are
+  excluded from reports and provenance. Privacy tests scan complete retained
+  real-browser and demo outputs for disposable secret values and source paths.
+- A successful driver import is not accepted as proof of authentication. The
+  declared role becomes verified only after its first visible UI checkpoint
+  passes, before later evidence or guide steps.
+
 ## [0.7.0] - 2026-07-27
 
 ### Added

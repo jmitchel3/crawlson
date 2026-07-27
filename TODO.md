@@ -54,16 +54,16 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
       offline, CI, privacy, and policy opt-outs. Development builds remain
       disabled until the release public key and signed assets exist.
 - [x] Add cross-platform CI with a stable aggregate `CI` check.
-- [x] Define the 0.7.0 four-target bundle, signed release inventory, raw-payload
+- [x] Define the 0.8.0 four-target bundle, signed release inventory, raw-payload
       update manifest, managed installer, and non-publishing dry-run contracts.
 - [x] Prove a clean managed install and packaged demo-application HTTP startup
       from every 0.5.1 dry-run bundle without using a production key or
       publishing a release.
 - [ ] Add a durable installer transaction journal and deterministic crash
       recovery before claiming rollback across process or machine termination.
-- [ ] Re-prove the clean managed install and complete packaged action-and-guide
-      demo from every 0.7.0 dry-run bundle.
-- [ ] Publish signed, immutable 0.7.0 bundles and raw update payloads after the
+- [ ] Re-prove the clean managed install and complete packaged authenticated
+      action-and-guide demo from every 0.8.0 dry-run bundle.
+- [ ] Publish signed, immutable 0.8.0 bundles and raw update payloads after the
       license, namespace, and production signing-key decisions are complete.
 
 ## Phase 1: define the contracts
@@ -86,8 +86,12 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [x] Define a stable report schema before polishing terminal output.
 - [x] Define provenance so every screenshot and executed step can be
       traced to a particular run and journey version.
-- [ ] Decide how secrets and authenticated session state are supplied without
-      entering journey files, logs, screenshots, or generated guides.
+- [x] Supply bounded exact-origin browser storage through an external private file,
+      without retaining its path or contents in journey files, reports, command
+      provenance, screenshots, traces, or generated guides. See
+      [`docs/architecture/authentication-v1.md`](docs/architecture/authentication-v1.md).
+      Cookie import remains fail-closed until the driver boundary can enforce
+      exact scheme, host, and port for every request.
 
 ## Phase 2: build the safe runner
 
@@ -102,7 +106,8 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Require an explicit mutation capability for journeys that change data.
 - [ ] Refuse mutating production runs unless the exact target and operation were
       explicitly authorized.
-- [ ] Add pluggable authentication/session providers.
+- [x] Add the first replaceable authentication provider for strict external
+      `agent-browser` state files and visible role verification.
 - [x] Implement the first runner with `agent-browser` behind a documented,
       replaceable execution boundary.
 - [ ] Capture step timing, navigation, console errors, failed requests, and
@@ -152,9 +157,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Replay a previously successful journey and explain meaningful differences.
 - [ ] Distinguish expected UI evolution from a broken user outcome.
 - [x] Define stable exit-code behavior for local use and CI.
-- [x] Publish a CI example that cannot turn missing authorization into green;
-      authenticated journeys remain explicitly blocked until an authentication
-      adapter exists.
+- [x] Publish a CI example that cannot turn missing target, action, or
+      authentication-state authorization into green; authenticated journeys
+      must visibly verify the declared role before evidence capture.
 - [x] Upload reports and evidence even when the required real-browser job fails.
 - [ ] Add a pull-request summary adapter only after the local workflow is sound.
 - [ ] Keep PR execution, scheduled staging runs, and interactive local runs as
@@ -174,6 +179,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
         fake process and a required-in-CI real agent-browser loopback fixture.
   - [x] Cover authorized link pass, preflight mismatch, missing grant,
         off-origin block, and uncertain post-dispatch action state.
+  - [x] Cover authenticated pass, missing/unsupported/invalid state, driver-load
+        failure, visible verification failure, temporary cleanup, and retained
+        output privacy with fake and real browser drivers.
   - [ ] Add mutation-denial coverage when a mutation contract exists.
 - [x] Prove that a clean source build can run the demo and reproduce the
       documented artifacts.
@@ -198,7 +206,9 @@ produce a trustworthy result. Use `agent-browser` for this first execution path.
 - [ ] Artifact storage and redaction policy
 - [ ] Accessibility, console, network, and visual checks in the default run
 - [ ] Fixture lifecycle and parallel-run isolation
-- [ ] Extension points for application authentication and role setup
+- [x] First application-neutral extension point for external authentication
+      state and visible role verification; login, hosted-secret, and fixture
+      setup providers remain future contracts.
 
 ## MVP definition of done
 

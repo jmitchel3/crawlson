@@ -139,6 +139,7 @@ fn package_impl(
         insert_source(&mut files, format!("bin/{file_name}"), &source, 0o755)?;
     }
     for name in [
+        "authenticated-pass.toml",
         "demo-fail.toml",
         "demo-pass.toml",
         "follow-link-fail.toml",
@@ -1355,6 +1356,7 @@ mod tests {
             assert!(members.contains_key("README.md"));
             assert!(members.contains_key("examples/demo-pass.toml"));
             assert!(members.contains_key("examples/demo-fail.toml"));
+            assert!(members.contains_key("examples/authenticated-pass.toml"));
             assert!(members.contains_key("examples/follow-link-pass.toml"));
             assert!(members.contains_key("examples/follow-link-fail.toml"));
             assert!(members.contains_key("scripts/demo.sh"));
@@ -1627,6 +1629,11 @@ mod tests {
         }
         fs::write(source.join("examples/demo-pass.toml"), b"pass = true\n").unwrap();
         fs::write(source.join("examples/demo-fail.toml"), b"pass = false\n").unwrap();
+        fs::write(
+            source.join("examples/authenticated-pass.toml"),
+            b"authenticated = true\n",
+        )
+        .unwrap();
         fs::write(
             source.join("examples/follow-link-pass.toml"),
             b"pass_action = true\n",

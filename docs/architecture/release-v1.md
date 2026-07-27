@@ -1,7 +1,7 @@
 # Release and managed-install contract v1
 
-Status: defined for Crawlson 0.7.0. The repository can exercise this contract
-with non-publishing dry-run artifacts, but no public 0.7.0 release exists yet.
+Status: defined for Crawlson 0.8.0. The repository can exercise this contract
+with non-publishing dry-run artifacts, but no public 0.8.0 release exists yet.
 
 ## Purpose and boundaries
 
@@ -62,6 +62,7 @@ crawlson-vVERSION-TARGET/
   examples/
     demo-pass.toml
     demo-fail.toml
+    authenticated-pass.toml
     follow-link-pass.toml
     follow-link-fail.toml
   scripts/
@@ -69,8 +70,10 @@ crawlson-vVERSION-TARGET/
 ```
 
 The three binaries are built for the archive target. The examples and script
-are the credential-free, loopback-only demonstration; they contain no private
-application fixtures or identifiers. The bundle-local script can find the
+are the self-contained, loopback-only demonstration; authenticated coverage
+creates disposable per-run exact-origin browser storage outside retained output
+and uses no third-party credentials. They contain no private application
+fixtures or identifiers. The bundle-local script can find the
 adjacent examples using the same relative layout used in a source checkout.
 
 `crawlson-bundle.json` schema v1 contains the stable version, exact target, and
@@ -208,7 +211,8 @@ guards remain in force.
 
 The proof requires a passing read-only observation, an intentional visible
 failure, a blocked missing-origin grant, a verified same-origin link action, an
-intentional post-action mismatch, and a blocked missing-action grant. It
+intentional post-action mismatch, a blocked missing-action grant, a visibly
+verified disposable authenticated session, and a blocked missing-state run. It
 verifies the run reports, trace, raw screenshot, focused screenshot, focus
 metadata, guide, and findings. The focused evidence must retain the vivid red
 action outline and dimmed surrounding page; merely producing a PNG is not
@@ -218,7 +222,7 @@ sufficient.
 
 The release dry run builds, packages, installs, and exercises bundle HTTP
 startup on all four native targets but cannot publish. The complete packaged
-six-outcome real-browser demo remains a required release proof and is not yet a
+eight-outcome real-browser demo remains a required release proof and is not yet a
 cross-target dry-run gate. Its workflow and token use read-only repository
 permissions. It has no release, tag, package, attestation, deployment, or
 external-registry write step and receives no production signing secret.

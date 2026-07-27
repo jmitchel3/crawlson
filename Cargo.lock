@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "crawlson"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "atomic-write-file",
@@ -362,6 +362,7 @@ dependencies = [
  "ureq",
  "url",
  "wait-timeout",
+ "zeroize",
 ]
 
 [[package]]

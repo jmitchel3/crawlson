@@ -33,11 +33,23 @@ help_output="$(bash "$repo_root/scripts/demo.sh" --help)"
 mkdir -p "$test_root/bin"
 cat >"$test_root/bin/crawlson" <<'SCRIPT'
 #!/usr/bin/env bash
+if [[ "${CRAWLSON_TEST_CLEANUP_MODE:-}" == "1" && "${1:-}" == "doctor" ]]; then
+  printf '%s\n' '{"status":"ready"}'
+  exit 0
+fi
 printf '%s\n' "$*" >"$CRAWLSON_TEST_INVOCATION"
 exit 23
 SCRIPT
 cat >"$test_root/bin/crawlson-demo" <<'SCRIPT'
 #!/usr/bin/env bash
+if [[ "${CRAWLSON_TEST_CLEANUP_MODE:-}" == "1" ]]; then
+  printf '%s\n' "$$" >"$CRAWLSON_TEST_DEMO_PID"
+  printf '%s\n' "{\"schema_version\":1,\"status\":\"ready\",\"origin\":\"http://127.0.0.1:4173\",\"pid\":$$}"
+  trap 'exit 0' TERM
+  while true; do
+    sleep 1
+  done
+fi
 exit 24
 SCRIPT
 cat >"$test_root/bin/cargo" <<'SCRIPT'
@@ -96,5 +108,51 @@ expect_status 23 env PATH="$test_root/bin:$PATH" \
 grep -F -- "doctor --json --agent-browser $resolved_agent_browser" \
   "$CRAWLSON_TEST_INVOCATION" >/dev/null \
   || fail "packaged Crawlson override was not invoked with the resolved driver"
+
+mkdir -p "$test_root/auth-tmp"
+export CRAWLSON_TEST_DEMO_PID="$test_root/cleanup-demo.pid"
+expect_status 1 env CRAWLSON_TEST_CLEANUP_MODE=1 \
+  TMPDIR="$test_root/auth-tmp" PATH="$test_root/bin:$PATH" \
+  bash "$repo_root/scripts/demo.sh" \
+  --crawlson-bin "$test_root/bin/crawlson" \
+  --demo-bin "$test_root/bin/crawlson-demo" \
+  --agent-browser agent-browser \
+  --output-dir "$test_root/cleanup-output" \
+  >"$test_root/cleanup.stdout" 2>"$test_root/cleanup.stderr"
+[[ -z "$(find "$test_root/auth-tmp" -mindepth 1 -print -quit)" ]] \
+  || fail "failure-path cleanup retained private authentication state"
+cleanup_demo_pid="$(<"$CRAWLSON_TEST_DEMO_PID")"
+if kill -0 "$cleanup_demo_pid" 2>/dev/null; then
+  fail "failure-path cleanup did not reap the owned demo process"
+fi
+[[ "$(<"$test_root/cleanup.stderr")" != *"$test_root/auth-tmp"* ]] \
+  || fail "failure-path diagnostics exposed the private authentication path"
+
+mkdir -p "$test_root/failing-rm-bin" "$test_root/auth-tmp-failure"
+cat >"$test_root/failing-rm-bin/rm" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'raw deletion failure: %s\n' "$*" >&2
+exit 1
+SCRIPT
+chmod +x "$test_root/failing-rm-bin/rm"
+export CRAWLSON_TEST_DEMO_PID="$test_root/cleanup-failure-demo.pid"
+expect_status 1 env CRAWLSON_TEST_CLEANUP_MODE=1 \
+  TMPDIR="$test_root/auth-tmp-failure" \
+  PATH="$test_root/failing-rm-bin:$test_root/bin:$PATH" \
+  bash "$repo_root/scripts/demo.sh" \
+  --crawlson-bin "$test_root/bin/crawlson" \
+  --demo-bin "$test_root/bin/crawlson-demo" \
+  --agent-browser agent-browser \
+  --output-dir "$test_root/cleanup-failure-output" \
+  >"$test_root/cleanup-failure.stdout" 2>"$test_root/cleanup-failure.stderr"
+cleanup_failure_stderr="$(<"$test_root/cleanup-failure.stderr")"
+[[ "$cleanup_failure_stderr" == *"could not remove private authentication state"* ]] \
+  || fail "authentication cleanup failure was not reported generically"
+[[ "$cleanup_failure_stderr" != *"$test_root/auth-tmp-failure"* ]] \
+  || fail "authentication cleanup failure exposed the private path"
+cleanup_failure_demo_pid="$(<"$CRAWLSON_TEST_DEMO_PID")"
+if kill -0 "$cleanup_failure_demo_pid" 2>/dev/null; then
+  fail "cleanup failure did not reap the owned demo process"
+fi
 
 echo "demo script argument tests passed"

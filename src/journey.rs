@@ -56,6 +56,8 @@ pub struct TargetSpec {
 pub struct AuthRequirement {
     pub provider: String,
     pub role: String,
+    #[serde(default)]
+    pub verification_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -296,9 +298,9 @@ pub fn load(path: &Path) -> Result<LoadedJourney, JourneyError> {
 pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError> {
     let document = loaded.document;
     let schema_version = document.schema_version;
-    if !matches!(schema_version, 1..=3) {
+    if !matches!(schema_version, 1..=4) {
         return Err(JourneyError::Validation(format!(
-            "unsupported schema_version {schema_version}; expected 1, 2, or 3"
+            "unsupported schema_version {schema_version}; expected 1, 2, 3, or 4"
         )));
     }
     validate_id("journey", &document.journey.id)?;
@@ -326,10 +328,7 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
         ));
     }
 
-    if let Some(authentication) = &document.authentication {
-        validate_nonempty("authentication provider", &authentication.provider)?;
-        validate_nonempty("authentication role", &authentication.role)?;
-    }
+    validate_authentication_fields(schema_version, document.authentication.as_ref())?;
 
     let origin = Origin::parse(&document.target.origin)?;
     let base = origin.base_url();
@@ -469,6 +468,8 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
         return Err(JourneyError::Validation(message.to_owned()));
     }
 
+    validate_authentication_steps(schema_version, document.authentication.as_ref(), &steps)?;
+
     Ok(ValidatedJourney {
         schema_version,
         source_path: loaded.source_path,
@@ -479,6 +480,100 @@ pub fn validate(loaded: LoadedJourney) -> Result<ValidatedJourney, JourneyError>
         evidence: document.evidence,
         steps,
     })
+}
+
+fn validate_authentication_fields(
+    schema_version: u8,
+    authentication: Option<&AuthRequirement>,
+) -> Result<(), JourneyError> {
+    if schema_version == 4 && authentication.is_none() {
+        return Err(JourneyError::Validation(
+            "journey schema version 4 requires an authentication contract".to_owned(),
+        ));
+    }
+    let Some(authentication) = authentication else {
+        return Ok(());
+    };
+    if schema_version == 4 {
+        validate_auth_identifier("authentication provider", &authentication.provider)?;
+        validate_auth_identifier("authentication role", &authentication.role)?;
+    } else {
+        validate_nonempty("authentication provider", &authentication.provider)?;
+        validate_nonempty("authentication role", &authentication.role)?;
+    }
+    match (schema_version, authentication.verification_step.as_deref()) {
+        (4, Some(step)) => validate_auth_identifier("authentication verification_step", step),
+        (4, None) => Err(JourneyError::Validation(
+            "journey schema version 4 requires authentication verification_step".to_owned(),
+        )),
+        (_, Some(_)) => Err(JourneyError::Validation(
+            "authentication verification_step requires journey schema version 4".to_owned(),
+        )),
+        (_, None) => Ok(()),
+    }
+}
+
+fn validate_authentication_steps(
+    schema_version: u8,
+    authentication: Option<&AuthRequirement>,
+    steps: &[ValidatedStep],
+) -> Result<(), JourneyError> {
+    if schema_version != 4 {
+        return Ok(());
+    }
+    let verification_step = authentication
+        .and_then(|value| value.verification_step.as_deref())
+        .expect("schema v4 authentication fields were validated");
+    let verification_index = steps
+        .iter()
+        .position(|step| step.id == verification_step)
+        .ok_or_else(|| {
+            JourneyError::Validation(
+                "authentication verification_step must reference a declared step".to_owned(),
+            )
+        })?;
+    if !matches!(
+        steps[verification_index].action,
+        ValidatedAction::CheckText { .. }
+    ) {
+        return Err(JourneyError::Validation(
+            "authentication verification_step must reference a check_text step".to_owned(),
+        ));
+    }
+    if steps[verification_index].guide_instruction.is_some()
+        || steps
+            .iter()
+            .take(verification_index)
+            .any(|step| step.guide_instruction.is_some())
+        || steps.iter().take(verification_index + 1).any(|step| {
+            matches!(
+                step.action,
+                ValidatedAction::Capture { .. } | ValidatedAction::FollowLink { .. }
+            )
+        })
+    {
+        return Err(JourneyError::Validation(
+            "authentication verification must precede guide evidence and interactive actions"
+                .to_owned(),
+        ));
+    }
+    if !steps
+        .iter()
+        .take(verification_index)
+        .any(|step| matches!(step.action, ValidatedAction::Navigate { .. }))
+        || steps.iter().take(verification_index).any(|step| {
+            matches!(
+                step.action,
+                ValidatedAction::CheckUrl { .. } | ValidatedAction::CheckText { .. }
+            )
+        })
+    {
+        return Err(JourneyError::Validation(
+            "authentication verification_step must be the first checkpoint after navigation"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn parse_authorized_origin(value: &str) -> Result<Origin, JourneyError> {
@@ -523,6 +618,21 @@ fn validate_id(kind: &str, value: &str) -> Result<(), JourneyError> {
     } else {
         Err(JourneyError::Validation(format!(
             "{kind} id '{value}' must use 1-96 lowercase letters, digits, dots, underscores, or hyphens"
+        )))
+    }
+}
+
+fn validate_auth_identifier(kind: &str, value: &str) -> Result<(), JourneyError> {
+    let valid = !value.is_empty()
+        && value.len() <= 96
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(JourneyError::Validation(format!(
+            "{kind} must use 1-96 lowercase letters, digits, dots, underscores, or hyphens"
         )))
     }
 }
@@ -779,6 +889,59 @@ action = { type = "navigate", path = "/", unexpected = true }
         let mut capture_only = valid_document();
         capture_only.document.schema_version = 3;
         assert!(validate(capture_only).is_ok());
+    }
+
+    #[test]
+    fn v4_authentication_requires_the_first_visible_checkpoint_before_evidence() {
+        let source = include_bytes!("../examples/authenticated-pass.toml");
+        let document: JourneyDocument = toml::from_slice(source).unwrap();
+        let loaded = |document| LoadedJourney {
+            source_path: PathBuf::from("authenticated-pass.toml"),
+            source_sha256: hex_digest(source),
+            document,
+        };
+        let valid = validate(loaded(document.clone())).unwrap();
+        assert_eq!(valid.schema_version, 4);
+
+        let mut capture_reference = document.clone();
+        capture_reference
+            .authentication
+            .as_mut()
+            .unwrap()
+            .verification_step = Some("capture-viewer-access".to_owned());
+        assert!(validate(loaded(capture_reference)).is_err());
+
+        let mut evidence_first = document.clone();
+        evidence_first.steps.swap(1, 2);
+        assert!(validate(loaded(evidence_first)).is_err());
+
+        let mut checkpoint_first = document.clone();
+        checkpoint_first.steps.insert(
+            1,
+            StepSpec {
+                id: "check-auth-url".to_owned(),
+                title: "Check authentication URL".to_owned(),
+                guide_instruction: None,
+                evidence_for: Vec::new(),
+                action: StepAction::CheckUrl {
+                    path: "/authenticated".to_owned(),
+                },
+            },
+        );
+        assert!(validate(loaded(checkpoint_first)).is_err());
+
+        let mut legacy = document;
+        legacy.schema_version = 3;
+        assert!(validate(loaded(legacy)).is_err());
+
+        let mut compatible_legacy = valid_document();
+        compatible_legacy.document.schema_version = 3;
+        compatible_legacy.document.authentication = Some(AuthRequirement {
+            provider: "Legacy Provider".to_owned(),
+            role: "Read Only Viewer".to_owned(),
+            verification_step: None,
+        });
+        assert!(validate(compatible_legacy).is_ok());
     }
 
     #[test]

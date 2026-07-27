@@ -13,13 +13,34 @@ fn main() {
     let fixture = fixture_directory();
     log_arguments(&fixture, &arguments);
     validate_environment();
-    let follow_link_policy = validate_globals(&arguments);
+    let (follow_link_policy, authentication_policy) = validate_globals(&arguments);
     let scenario = fs::read_to_string(fixture.join("scenario"))
         .unwrap_or_else(|_| "pass".to_owned())
         .trim()
         .to_owned();
     let command = command_arguments(&arguments);
     match command.as_slice() {
+        [name, operation, path] if name == "state" && operation == "load" => {
+            if !authentication_policy {
+                failure("authentication state was not enabled by policy", 9);
+            }
+            fs::write(fixture.join("loaded-state-path"), path).unwrap();
+            if scenario == "auth_load_error" {
+                failure(&format!("fixture rejected authentication state {path}"), 1);
+            }
+            let contents = fs::read(path).unwrap_or_default();
+            if contents.is_empty()
+                || !contents.starts_with(b"{")
+                || !contents.windows(9).any(|window| window == b"\"cookies\"")
+            {
+                failure("fixture authentication state was invalid", 1);
+            }
+            fs::write(fixture.join("authentication-loaded"), b"1").unwrap();
+            success(&format!(
+                r#"{{"loaded":true,"path":"{}"}}"#,
+                json(path)
+            ));
+        }
         [name, operation, width, height]
             if name == "set" && operation == "viewport" && width == "1280" && height == "720" =>
         {
@@ -145,6 +166,19 @@ fn main() {
                 success(r#"{"origin":"http://127.0.0.1:9999/escaped","text":"Hello"}"#)
             }
             "fail_text" => success(r#"{"origin":"http://127.0.0.1:4173","text":"Different"}"#),
+            _ if selector == "#authenticated-role" => {
+                if fixture.join("authentication-loaded").exists()
+                    && scenario != "auth_verification_fail"
+                {
+                    success(
+                        r#"{"origin":"http://127.0.0.1:4173/authenticated","text":"Viewer access"}"#,
+                    )
+                } else {
+                    success(
+                        r#"{"origin":"http://127.0.0.1:4173/authenticated","text":"Sign in required"}"#,
+                    )
+                }
+            }
             _ if selector == "#completion-heading" => success(
                 r#"{"origin":"http://127.0.0.1:4173/complete","text":"Complete"}"#,
             ),
@@ -243,6 +277,9 @@ fn main() {
             });
         }
         [name, path] if name == "screenshot" => {
+            if scenario == "capture_error" {
+                failure("fixture screenshot failed", 1);
+            }
             fs::copy(fixture.join("screenshot.png"), path).unwrap();
             success(&format!(r#"{{"path":"{}"}}"#, json(path)));
         }
@@ -259,6 +296,11 @@ fn main() {
             success(r#"{"errors":[]}"#);
         }
         [name] if name == "close" => {
+            if let Ok(path) = fs::read_to_string(fixture.join("loaded-state-path")) {
+                if Path::new(&path).exists() {
+                    failure("authentication staging survived until browser close", 9);
+                }
+            }
             if scenario == "cleanup_fail" {
                 failure("fixture cleanup failed", 1);
             } else {
@@ -311,6 +353,13 @@ fn log_arguments(directory: &Path, arguments: &[String]) {
             *value = "<redacted>".to_owned();
         }
     }
+    if safe.get(17).map(String::as_str) == Some("state")
+        && safe.get(18).map(String::as_str) == Some("load")
+    {
+        if let Some(value) = safe.get_mut(19) {
+            *value = "<redacted-auth-state>".to_owned();
+        }
+    }
     let safe = safe
         .iter()
         .map(|value| log_field(value))
@@ -354,7 +403,7 @@ fn validate_environment() {
     }
 }
 
-fn validate_globals(arguments: &[String]) -> bool {
+fn validate_globals(arguments: &[String]) -> (bool, bool) {
     let valid_shape = arguments.len() >= 18
         && arguments[0] == "--session"
         && arguments[1].starts_with("crawlson-")
@@ -381,10 +430,19 @@ fn validate_globals(arguments: &[String]) -> bool {
     let policy = fs::read_to_string(&arguments[8]).unwrap_or_default();
     let read_only = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n";
     let follow_link = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\"]}\n";
-    if policy != read_only && policy != follow_link {
+    let authenticated_read_only = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"state_load\"]}\n";
+    let authenticated_follow_link = "{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\",\"state_load\"]}\n";
+    if policy != read_only
+        && policy != follow_link
+        && policy != authenticated_read_only
+        && policy != authenticated_follow_link
+    {
         failure("invalid action policy", 9);
     }
-    policy == follow_link
+    (
+        policy == follow_link || policy == authenticated_follow_link,
+        policy == authenticated_read_only || policy == authenticated_follow_link,
+    )
 }
 
 fn require_follow_link_policy(follow_link_policy: bool) {
