@@ -194,6 +194,385 @@ fn authenticated_journey_is_explicitly_blocked_before_driver_launch() {
 }
 
 #[test]
+fn authenticated_state_is_verified_without_retaining_secret_material() {
+    for name in ["crawlson", "clson"] {
+        let fixture = FakeAgentBrowser::compile();
+        let directory = tempfile::tempdir().unwrap();
+        let journey = write_authenticated_journey(directory.path(), "agent-browser-state-file");
+        let state_path = write_auth_state(
+            directory.path(),
+            "private-auth-source-sentinel",
+            "state-storage-value-sentinel",
+            "http://127.0.0.1:4173",
+        );
+        let output = run_authenticated_command(
+            name,
+            &journey,
+            directory.path(),
+            &fixture,
+            Some(&state_path),
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        validate_schema(
+            include_str!("../schemas/run-report-v3.schema.json"),
+            &report,
+        );
+        let mut contradicted_status = report.clone();
+        contradicted_status["authentication"]["status"] = Value::String("missing".to_owned());
+        assert_schema_rejects(
+            include_str!("../schemas/run-report-v3.schema.json"),
+            &contradicted_status,
+        );
+        assert_eq!(report["schema_version"], 3);
+        assert_eq!(report["outcome"], "passed");
+        assert_eq!(report["authentication"]["status"], "verified");
+        assert_eq!(
+            report["authentication"]["verification_step"],
+            "verify-viewer-session"
+        );
+        let commands = report["driver"]["commands"].as_array().unwrap();
+        assert_eq!(commands[0]["capability"], "set_viewport");
+        assert_eq!(commands[1]["capability"], "authentication_load");
+        assert_eq!(commands[2]["capability"], "trace_start");
+        assert_eq!(commands[1]["stdout_bytes"], 0);
+        assert_eq!(commands[1]["stderr_bytes"], 0);
+        assert_eq!(
+            commands[1]["stdout_captured_sha256"],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        let run_root = PathBuf::from(report["run_directory"].as_str().unwrap());
+        let rendered = render_command(name, &run_root, &journey);
+        assert_eq!(rendered.status.code(), Some(0));
+        let calls = fs::read_to_string(fixture.call_log()).unwrap();
+        assert!(calls.contains("<redacted-auth-state>"));
+        for sentinel in [
+            state_path.to_string_lossy().as_ref(),
+            "private-auth-source-sentinel",
+            "state-storage-value-sentinel",
+        ] {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(sentinel));
+            assert!(!String::from_utf8_lossy(&rendered.stdout).contains(sentinel));
+            assert!(!calls.contains(sentinel));
+            for (_, bytes) in snapshot_directory(&run_root) {
+                assert!(!String::from_utf8_lossy(&bytes).contains(sentinel));
+            }
+        }
+    }
+}
+
+#[test]
+fn authenticated_preflight_and_load_failures_are_explicit_and_fail_closed() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_authenticated_journey(directory.path(), "agent-browser-state-file");
+
+    let missing = run_authenticated_command("crawlson", &journey, directory.path(), &fixture, None);
+    assert_eq!(missing.status.code(), Some(3));
+    let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["reason"]["code"], "authentication_state_missing");
+    assert_eq!(missing["authentication"]["status"], "missing");
+    assert!(missing["driver"]["commands"].as_array().unwrap().is_empty());
+
+    let unsupported_journey =
+        write_authenticated_journey(directory.path(), "unsupported-state-provider");
+    let valid_state = write_auth_state(
+        directory.path(),
+        "unsupported-provider-state",
+        "fixture",
+        "http://127.0.0.1:4173",
+    );
+    let unsupported = run_authenticated_command(
+        "crawlson",
+        &unsupported_journey,
+        directory.path(),
+        &fixture,
+        Some(&valid_state),
+    );
+    assert_eq!(unsupported.status.code(), Some(3));
+    let unsupported: Value = serde_json::from_slice(&unsupported.stdout).unwrap();
+    assert_eq!(
+        unsupported["reason"]["code"],
+        "authentication_provider_unsupported"
+    );
+    assert_eq!(unsupported["authentication"]["status"], "unsupported");
+    assert!(
+        unsupported["driver"]["commands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let invalid_state = write_auth_state(
+        directory.path(),
+        "off-origin-auth-state",
+        "private-value",
+        "http://other.example",
+    );
+    let invalid = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&invalid_state),
+    );
+    assert_eq!(invalid.status.code(), Some(3));
+    let invalid: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(invalid["reason"]["code"], "authentication_state_invalid");
+    assert_eq!(invalid["authentication"]["status"], "invalid");
+    assert!(invalid["driver"]["commands"].as_array().unwrap().is_empty());
+
+    let cookie_state = write_cookie_auth_state(directory.path());
+    let cookie = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&cookie_state),
+    );
+    assert_eq!(cookie.status.code(), Some(3));
+    let cookie: Value = serde_json::from_slice(&cookie.stdout).unwrap();
+    assert_eq!(cookie["reason"]["code"], "authentication_state_invalid");
+    assert!(cookie["driver"]["commands"].as_array().unwrap().is_empty());
+
+    let unauthenticated = write_journey(directory.path(), "Hello", false);
+    let unexpected = run_authenticated_command(
+        "crawlson",
+        &unauthenticated,
+        directory.path(),
+        &fixture,
+        Some(&valid_state),
+    );
+    assert_eq!(unexpected.status.code(), Some(3));
+    let unexpected: Value = serde_json::from_slice(&unexpected.stdout).unwrap();
+    assert_eq!(unexpected["reason"]["code"], "authentication_unexpected");
+    assert!(
+        unexpected["driver"]["commands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!fixture.call_log().exists());
+}
+
+#[test]
+fn target_authorization_precedes_authentication_state_access() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_authenticated_journey(directory.path(), "agent-browser-state-file");
+    let nonexistent = directory.path().join("private-path-must-not-be-read.json");
+    let output = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--auth-state", nonexistent.to_str().unwrap()],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["reason"]["code"], "target_authorization_missing");
+    assert_eq!(report["authentication"]["status"], "blocked");
+    assert!(report["driver"]["commands"].as_array().unwrap().is_empty());
+    assert!(!fixture.call_log().exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-path"));
+}
+
+#[test]
+fn authentication_load_and_visible_verification_failures_cannot_publish() {
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_authenticated_journey(directory.path(), "agent-browser-state-file");
+    let state_path = write_auth_state(
+        directory.path(),
+        "private-load-source",
+        "private-load-value",
+        "http://127.0.0.1:4173",
+    );
+
+    let fixture = FakeAgentBrowser::compile();
+    fixture.set_scenario("auth_load_error");
+    let failed = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&state_path),
+    );
+    assert_eq!(failed.status.code(), Some(4));
+    let failed_report: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    validate_schema(
+        include_str!("../schemas/run-report-v3.schema.json"),
+        &failed_report,
+    );
+    assert_eq!(
+        failed_report["reason"]["code"],
+        "authentication_state_load_failed"
+    );
+    assert_eq!(failed_report["authentication"]["status"], "load_failed");
+    assert_eq!(failed_report["cleanup"]["status"], "passed");
+    assert_eq!(
+        failed_report["driver"]["commands"][1]["capability"],
+        "authentication_load"
+    );
+    assert_eq!(failed_report["driver"]["commands"][1]["stdout_bytes"], 0);
+    assert!(!String::from_utf8_lossy(&failed.stdout).contains("private-load"));
+    let failed_root = PathBuf::from(failed_report["run_directory"].as_str().unwrap());
+    let failed_render = render_command("crawlson", &failed_root, &journey);
+    assert_eq!(failed_render.status.code(), Some(4));
+
+    let fixture = FakeAgentBrowser::compile();
+    fixture.set_scenario("capture_error");
+    let post_verification_error = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&state_path),
+    );
+    assert_eq!(post_verification_error.status.code(), Some(4));
+    let post_verification_report: Value =
+        serde_json::from_slice(&post_verification_error.stdout).unwrap();
+    assert_eq!(
+        post_verification_report["authentication"]["status"],
+        "verified"
+    );
+    assert_eq!(post_verification_report["execution_outcome"], "error");
+    validate_schema(
+        include_str!("../schemas/run-report-v3.schema.json"),
+        &post_verification_report,
+    );
+
+    let fixture = FakeAgentBrowser::compile();
+    fixture.set_scenario("auth_verification_fail");
+    let blocked = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&state_path),
+    );
+    assert_eq!(blocked.status.code(), Some(3));
+    let blocked_report: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(
+        blocked_report["reason"]["code"],
+        "authentication_verification_failed"
+    );
+    assert_eq!(blocked_report["authentication"]["status"], "blocked");
+    assert_eq!(blocked_report["steps"].as_array().unwrap().len(), 2);
+    assert!(
+        blocked_report["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|artifact| artifact["kind"] != "raw_screenshot")
+    );
+    let blocked_root = PathBuf::from(blocked_report["run_directory"].as_str().unwrap());
+    let blocked_render = render_command("crawlson", &blocked_root, &journey);
+    assert_eq!(blocked_render.status.code(), Some(3));
+}
+
+#[test]
+fn authenticated_render_rejects_tampered_authentication_state_machine() {
+    let fixture = FakeAgentBrowser::compile();
+    let directory = tempfile::tempdir().unwrap();
+    let journey = write_authenticated_journey(directory.path(), "agent-browser-state-file");
+    let state = write_auth_state(
+        directory.path(),
+        "tamper-auth-source",
+        "tamper-auth-value",
+        "http://127.0.0.1:4173",
+    );
+
+    let passed = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&state),
+    );
+    assert_eq!(passed.status.code(), Some(0));
+    let original: Value = serde_json::from_slice(&passed.stdout).unwrap();
+    let passed_root = PathBuf::from(original["run_directory"].as_str().unwrap());
+
+    let mut status_tamper = original.clone();
+    status_tamper["outcome"] = Value::String("error".to_owned());
+    status_tamper["reason"] = serde_json::json!({
+        "code": "cleanup_failed",
+        "message": "synthetic cleanup failure"
+    });
+    status_tamper["cleanup"] = serde_json::json!({
+        "attempted": true,
+        "status": "failed",
+        "error": "synthetic cleanup failure"
+    });
+    status_tamper["authentication"]["status"] = Value::String("blocked".to_owned());
+    write_json(passed_root.join("report.json"), &status_tamper);
+    let rejected = render_command("crawlson", &passed_root, &journey);
+    assert_eq!(rejected.status.code(), Some(4));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&rejected.stdout).unwrap()["reason"]["code"],
+        "report_invalid"
+    );
+
+    let mut load_tamper = original;
+    load_tamper["driver"]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    write_json(passed_root.join("report.json"), &load_tamper);
+    let rejected = render_command("crawlson", &passed_root, &journey);
+    assert_eq!(rejected.status.code(), Some(4));
+
+    let preflight = run_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        &["--auth-state", state.to_str().unwrap()],
+    );
+    assert_eq!(preflight.status.code(), Some(3));
+    let mut preflight: Value = serde_json::from_slice(&preflight.stdout).unwrap();
+    let preflight_root = PathBuf::from(preflight["run_directory"].as_str().unwrap());
+    preflight["authentication"]["status"] = Value::String("missing".to_owned());
+    write_json(preflight_root.join("report.json"), &preflight);
+    let rejected = render_command("crawlson", &preflight_root, &journey);
+    assert_eq!(rejected.status.code(), Some(4));
+
+    fixture.set_scenario("auth_verification_fail");
+    let verification = run_authenticated_command(
+        "crawlson",
+        &journey,
+        directory.path(),
+        &fixture,
+        Some(&state),
+    );
+    assert_eq!(verification.status.code(), Some(3));
+    let mut verification: Value = serde_json::from_slice(&verification.stdout).unwrap();
+    let verification_root = PathBuf::from(verification["run_directory"].as_str().unwrap());
+    verification["outcome"] = Value::String("error".to_owned());
+    verification["reason"] = serde_json::json!({
+        "code": "cleanup_failed",
+        "message": "synthetic cleanup failure"
+    });
+    verification["cleanup"] = serde_json::json!({
+        "attempted": true,
+        "status": "failed",
+        "error": "synthetic cleanup failure"
+    });
+    verification["authentication"]["status"] = Value::String("invalid".to_owned());
+    write_json(verification_root.join("report.json"), &verification);
+    let rejected = render_command("crawlson", &verification_root, &journey);
+    assert_eq!(rejected.status.code(), Some(4));
+}
+
+#[test]
 fn follow_link_requires_the_exact_step_grant_before_driver_launch() {
     let fixture = FakeAgentBrowser::compile();
     let directory = tempfile::tempdir().unwrap();
@@ -908,6 +1287,33 @@ fn published_journey_v2_schema_accepts_the_example_and_rejects_ambiguous_extensi
     let mut query_path = document;
     query_path["steps"][0]["action"]["path"] = Value::String("/?secret=value".to_owned());
     assert!(validator.validate(&query_path).is_err());
+}
+
+#[test]
+fn published_journey_v4_schema_requires_a_secret_free_verification_contract() {
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/journey-v4.schema.json")).unwrap();
+    jsonschema::meta::validate(&schema).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let document: toml::Value =
+        toml::from_str(include_str!("../examples/authenticated-pass.toml")).unwrap();
+    let document = serde_json::to_value(document).unwrap();
+    validator.validate(&document).unwrap();
+
+    let mut embedded_state = document.clone();
+    embedded_state["authentication"]["state"] = Value::String("secret.json".to_owned());
+    assert!(validator.validate(&embedded_state).is_err());
+
+    let mut missing_verification = document.clone();
+    missing_verification["authentication"]
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_step");
+    assert!(validator.validate(&missing_verification).is_err());
+
+    let mut unsafe_role = document;
+    unsafe_role["authentication"]["role"] = Value::String("Viewer Email".to_owned());
+    assert!(validator.validate(&unsafe_role).is_err());
 }
 
 #[test]
@@ -2481,6 +2887,31 @@ fn run_command(
         .unwrap()
 }
 
+fn run_authenticated_command(
+    name: &str,
+    journey: &Path,
+    directory: &Path,
+    fixture: &FakeAgentBrowser,
+    auth_state: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(cargo_bin(name));
+    command
+        .args(["--json", "run"])
+        .arg(journey)
+        .arg("--output-dir")
+        .arg(directory.join("authenticated-runs"))
+        .arg("--agent-browser")
+        .arg(&fixture.binary)
+        .args(["--allow-origin", "http://127.0.0.1:4173"]);
+    if let Some(path) = auth_state {
+        command.arg("--auth-state").arg(path);
+    }
+    command
+        .env("CRAWLSON_UNSAFE_TEST_ENV", "must-be-scrubbed")
+        .output()
+        .unwrap()
+}
+
 fn render_command(name: &str, run_directory: &Path, journey: &Path) -> std::process::Output {
     Command::new(cargo_bin(name))
         .args(["--json", "render"])
@@ -2627,6 +3058,92 @@ action = {{ type = "capture", selector = "h1", alt_text = "Highlighted heading" 
     );
     let path = directory.join("journey.toml");
     fs::write(&path, source).unwrap();
+    path
+}
+
+fn write_authenticated_journey(directory: &Path, provider: &str) -> PathBuf {
+    let source = format!(
+        r##"
+schema_version = 4
+
+[journey]
+id = "fixture.authenticated"
+revision = 1
+title = "Read authenticated page"
+purpose = "Verify the declared viewer role through the visible UI."
+expected_outcome = "The viewer access marker is visible."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[authentication]
+provider = "{provider}"
+role = "viewer"
+verification_step = "verify-viewer-session"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-authenticated"
+title = "Open the authenticated page"
+action = {{ type = "navigate", path = "/authenticated" }}
+
+[[steps]]
+id = "verify-viewer-session"
+title = "Verify viewer access"
+action = {{ type = "check_text", selector = "#authenticated-role", expected = "Viewer access", comparison = "exact" }}
+
+[[steps]]
+id = "capture-viewer-access"
+title = "Capture viewer access"
+guide_instruction = "Review the highlighted viewer access marker."
+evidence_for = ["verify-viewer-session"]
+action = {{ type = "capture", selector = "#authenticated-role", alt_text = "Viewer access marker highlighted in red" }}
+"##
+    );
+    let path = directory.join(format!("authenticated-{provider}.toml"));
+    fs::write(&path, source).unwrap();
+    path
+}
+
+fn write_auth_state(directory: &Path, name: &str, value: &str, origin: &str) -> PathBuf {
+    let path = directory.join(format!("{name}.json"));
+    let state = serde_json::json!({
+        "cookies": [],
+        "origins": [{
+            "origin": origin,
+            "localStorage": [{"name": "crawlson_demo_session", "value": value}]
+        }]
+    });
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
+fn write_cookie_auth_state(directory: &Path) -> PathBuf {
+    let path = directory.join("port-agnostic-cookie-state.json");
+    let state = serde_json::json!({
+        "cookies": [{
+            "name": "session",
+            "value": "must-not-load",
+            "domain": "127.0.0.1",
+            "path": "/"
+        }],
+        "origins": []
+    });
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     path
 }
 

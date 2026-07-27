@@ -246,6 +246,67 @@ fn real_agent_browser_runs_the_complete_loopback_demo() {
             .is_some_and(Vec::is_empty)
     );
 
+    let authenticated_journey =
+        copy_demo_journey(directory.path(), "authenticated-pass.toml", &demo.origin);
+    let (auth_state, auth_storage_value) = write_auth_state(directory.path(), &demo.origin);
+    let authenticated = run_authenticated_journey(
+        &authenticated_journey,
+        &directory.path().join("authenticated-runs"),
+        agent_browser.as_os_str(),
+        &demo.origin,
+        Some(&auth_state),
+    );
+    assert_exit(&authenticated, 0, "authenticated real-browser journey");
+    let authenticated_report = json_stdout(&authenticated, "authenticated real-browser journey");
+    assert_eq!(authenticated_report["schema_version"], 3);
+    assert_eq!(authenticated_report["outcome"], "passed");
+    assert_eq!(authenticated_report["authentication"]["status"], "verified");
+    let commands = authenticated_report["driver"]["commands"]
+        .as_array()
+        .expect("authenticated driver commands");
+    assert_eq!(commands[0]["capability"], "set_viewport");
+    assert_eq!(commands[1]["capability"], "authentication_load");
+    assert_eq!(commands[2]["capability"], "trace_start");
+    assert_eq!(commands[1]["stdout_bytes"], 0);
+    assert_eq!(commands[1]["stderr_bytes"], 0);
+    let authenticated_root = run_root(&authenticated_report);
+    let authenticated_evidence = verify_evidence(&authenticated_root, &authenticated_report);
+    verify_focus_pixels(&authenticated_evidence);
+    let authenticated_render = render_journey(&authenticated_root, &authenticated_journey);
+    assert_exit(&authenticated_render, 0, "authenticated guide render");
+    assert_eq!(
+        json_stdout(&authenticated_render, "authenticated guide render")["status"],
+        "guide_ready"
+    );
+
+    let source_path = auth_state.to_string_lossy().to_string();
+    fs::remove_file(&auth_state).expect("remove disposable authentication state");
+    for sentinel in [&source_path, &auth_storage_value] {
+        assert!(!String::from_utf8_lossy(&authenticated.stdout).contains(sentinel));
+        assert!(!String::from_utf8_lossy(&authenticated.stderr).contains(sentinel));
+        assert_tree_excludes(&authenticated_root, sentinel.as_bytes());
+    }
+
+    let authentication_blocked = run_authenticated_journey(
+        &authenticated_journey,
+        &directory.path().join("authentication-blocked-runs"),
+        agent_browser.as_os_str(),
+        &demo.origin,
+        None,
+    );
+    assert_exit(&authentication_blocked, 3, "missing authentication state");
+    let authentication_blocked_report =
+        json_stdout(&authentication_blocked, "missing authentication state");
+    assert_eq!(
+        authentication_blocked_report["reason"]["code"],
+        "authentication_state_missing"
+    );
+    assert!(
+        authentication_blocked_report["driver"]["commands"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+
     demo.shutdown();
 }
 
@@ -517,6 +578,68 @@ fn run_journey(
         command.arg("--allow-action").arg(action);
     }
     command_output(command, "crawlson run")
+}
+
+fn run_authenticated_journey(
+    journey: &Path,
+    output_directory: &Path,
+    agent_browser: &OsStr,
+    allowed_origin: &str,
+    auth_state: Option<&Path>,
+) -> Output {
+    let mut command = Command::new(crawlson_executable());
+    command
+        .args(["--json", "run"])
+        .arg(journey)
+        .arg("--output-dir")
+        .arg(output_directory)
+        .arg("--agent-browser")
+        .arg(agent_browser)
+        .arg("--allow-origin")
+        .arg(allowed_origin);
+    if let Some(path) = auth_state {
+        command.arg("--auth-state").arg(path);
+    }
+    command_output(command, "authenticated crawlson run")
+}
+
+fn write_auth_state(directory: &Path, origin: &str) -> (PathBuf, String) {
+    let value = format!("crawlson-demo-fixture-real-{}", std::process::id());
+    let path = directory.join("private-auth-state-source.json");
+    let document = serde_json::json!({
+        "cookies": [],
+        "origins": [{
+            "origin": origin,
+            "localStorage": [{"name": "crawlson_demo_session", "value": value}]
+        }]
+    });
+    fs::write(&path, serde_json::to_vec(&document).unwrap())
+        .expect("write disposable authentication state");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("restrict disposable authentication state");
+    }
+    (path, value)
+}
+
+fn assert_tree_excludes(root: &Path, sentinel: &[u8]) {
+    for entry in fs::read_dir(root).expect("read retained run tree") {
+        let entry = entry.expect("read retained run entry");
+        let file_type = entry.file_type().expect("inspect retained run entry");
+        if file_type.is_dir() {
+            assert_tree_excludes(&entry.path(), sentinel);
+        } else if file_type.is_file() {
+            let bytes = fs::read(entry.path()).expect("read retained run file");
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel),
+                "authentication state material leaked into retained run output"
+            );
+        }
+    }
 }
 
 fn render_journey(run_directory: &Path, journey: &Path) -> Output {

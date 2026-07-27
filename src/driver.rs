@@ -24,6 +24,8 @@ const OWNED_CONFIG: &[u8] =
     b"{\"headed\":false,\"noAutoDialog\":true,\"screenshotFormat\":\"png\"}\n";
 const READ_ONLY_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\"]}\n";
 const FOLLOW_LINK_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\"]}\n";
+const AUTHENTICATED_READ_ONLY_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"state_load\"]}\n";
+const AUTHENTICATED_FOLLOW_LINK_POLICY: &[u8] = b"{\"default\":\"deny\",\"allow\":[\"launch\",\"viewport\",\"trace_start\",\"trace_stop\",\"navigate\",\"url\",\"gettext\",\"isvisible\",\"boundingbox\",\"screenshot\",\"console\",\"errors\",\"close\",\"getattribute\",\"isenabled\",\"click\",\"state_load\"]}\n";
 pub const VIEWPORT_WIDTH_CSS: f64 = 1280.0;
 pub const VIEWPORT_HEIGHT_CSS: f64 = 720.0;
 
@@ -31,6 +33,8 @@ pub const VIEWPORT_HEIGHT_CSS: f64 = 720.0;
 pub enum DriverPolicyMode {
     ReadOnly,
     FollowLink,
+    AuthenticatedReadOnly,
+    AuthenticatedFollowLink,
 }
 
 impl DriverPolicyMode {
@@ -38,6 +42,8 @@ impl DriverPolicyMode {
         match self {
             Self::ReadOnly => READ_ONLY_POLICY,
             Self::FollowLink => FOLLOW_LINK_POLICY,
+            Self::AuthenticatedReadOnly => AUTHENTICATED_READ_ONLY_POLICY,
+            Self::AuthenticatedFollowLink => AUTHENTICATED_FOLLOW_LINK_POLICY,
         }
     }
 }
@@ -101,6 +107,12 @@ pub enum DriverError {
 
 pub trait BrowserDriver {
     fn prepare(&mut self) -> Result<(), DriverError>;
+    fn load_authentication(&mut self, _path: &Path) -> Result<(), DriverError> {
+        Err(DriverError::Protocol {
+            capability: "authentication_load".to_owned(),
+            message: "driver does not implement authentication state loading".to_owned(),
+        })
+    }
     fn start_trace(&mut self) -> Result<(), DriverError>;
     fn navigate(&mut self, url: &Url) -> Result<(), DriverError>;
     fn current_url(&mut self) -> Result<Url, DriverError>;
@@ -203,6 +215,8 @@ impl AgentBrowserDriver {
         let policy_path = control.join(match policy_mode {
             DriverPolicyMode::ReadOnly => "read-only-policy.json",
             DriverPolicyMode::FollowLink => "follow-link-policy.json",
+            DriverPolicyMode::AuthenticatedReadOnly => "authenticated-read-only-policy.json",
+            DriverPolicyMode::AuthenticatedFollowLink => "authenticated-follow-link-policy.json",
         });
         let policy = policy_mode.policy();
         fs::write(&config_path, OWNED_CONFIG)
@@ -377,18 +391,19 @@ impl AgentBrowserDriver {
         stdout: &LimitedRead,
         stderr: &LimitedRead,
     ) {
+        let sensitive = capability == "authentication_load";
         self.records.push(DriverCommandRecord {
             sequence: self.records.len() as u32 + 1,
             capability: capability.to_owned(),
             duration_ms: duration_ms(start.elapsed()),
             exit_code: status.and_then(|value| value.code()),
             upstream_success,
-            stdout_bytes: stdout.total,
-            stdout_captured_bytes: stdout.bytes.len(),
-            stdout_captured_sha256: hex_digest(&stdout.bytes),
-            stderr_bytes: stderr.total,
-            stderr_captured_bytes: stderr.bytes.len(),
-            stderr_captured_sha256: hex_digest(&stderr.bytes),
+            stdout_bytes: if sensitive { 0 } else { stdout.total },
+            stdout_captured_bytes: if sensitive { 0 } else { stdout.bytes.len() },
+            stdout_captured_sha256: hex_digest(if sensitive { &[] } else { &stdout.bytes }),
+            stderr_bytes: if sensitive { 0 } else { stderr.total },
+            stderr_captured_bytes: if sensitive { 0 } else { stderr.bytes.len() },
+            stderr_captured_sha256: hex_digest(if sensitive { &[] } else { &stderr.bytes }),
         });
     }
 
@@ -467,6 +482,22 @@ impl BrowserDriver for AgentBrowserDriver {
             scroll_x_css: None,
             scroll_y_css: None,
         });
+        Ok(())
+    }
+
+    fn load_authentication(&mut self, path: &Path) -> Result<(), DriverError> {
+        let value = path.to_str().ok_or_else(|| {
+            DriverError::Io("temporary authentication state path is not valid UTF-8".to_owned())
+        })?;
+        let data = self.execute("authentication_load", &["state", "load", value])?;
+        if data.get("loaded").and_then(Value::as_bool) != Some(true)
+            || data.get("path").and_then(Value::as_str) != Some(value)
+        {
+            return Err(DriverError::Protocol {
+                capability: "authentication_load".to_owned(),
+                message: "response did not confirm the exact temporary state path".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -934,6 +965,35 @@ mod tests {
                 .iter()
                 .all(|capability| follow_link.contains(capability))
         );
+    }
+
+    #[test]
+    fn authenticated_policies_add_only_state_loading() {
+        for (base, authenticated) in [
+            (
+                DriverPolicyMode::ReadOnly,
+                DriverPolicyMode::AuthenticatedReadOnly,
+            ),
+            (
+                DriverPolicyMode::FollowLink,
+                DriverPolicyMode::AuthenticatedFollowLink,
+            ),
+        ] {
+            let base: Value = serde_json::from_slice(base.policy()).unwrap();
+            let authenticated: Value = serde_json::from_slice(authenticated.policy()).unwrap();
+            let base = base["allow"].as_array().unwrap();
+            let authenticated = authenticated["allow"].as_array().unwrap();
+            let additions = authenticated
+                .iter()
+                .filter(|capability| !base.contains(capability))
+                .collect::<Vec<_>>();
+
+            assert_eq!(additions, vec![&Value::String("state_load".to_owned())]);
+            assert!(
+                base.iter()
+                    .all(|capability| authenticated.contains(capability))
+            );
+        }
     }
 
     #[test]

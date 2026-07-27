@@ -8,6 +8,7 @@ use atomic_write_file::AtomicWriteFile;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::auth::{AGENT_BROWSER_STATE_FILE_PROVIDER, ValidatedState};
 use crate::doctor::{self, CheckStatus, DoctorOptions};
 use crate::driver::{
     AgentBrowserDriver, BrowserDriver, CaptureBundle, DiagnosticsSummary, DriverCommandRecord,
@@ -27,6 +28,7 @@ pub struct RunOptions {
     pub journey_path: PathBuf,
     pub allowed_origin: Option<String>,
     pub allowed_actions: Vec<String>,
+    pub auth_state: Option<PathBuf>,
     pub output_directory: PathBuf,
     pub agent_browser: Option<PathBuf>,
     pub action_timeout: Duration,
@@ -73,6 +75,8 @@ pub struct RunReport {
     pub target_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_authorization: Option<ActionAuthorizationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticationReport>,
     pub started_at_unix_ms: u64,
     pub finished_at_unix_ms: u64,
     pub duration_ms: u64,
@@ -93,6 +97,26 @@ pub struct ActionAuthorizationReport {
     pub required: Vec<String>,
     pub granted: Vec<String>,
     pub binding_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthenticationReport {
+    pub provider: String,
+    pub role: String,
+    pub verification_step: String,
+    pub status: AuthenticationStatus,
+    pub binding_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationStatus {
+    Missing,
+    Unsupported,
+    Invalid,
+    LoadFailed,
+    Blocked,
+    Verified,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,7 +307,28 @@ pub fn run(options: RunOptions) -> RunReport {
     report.journey.id = Some(journey.meta.id.clone());
     report.journey.revision = Some(journey.meta.revision);
     report.target_origin = Some(journey.origin.to_string());
-    report.schema_version = if journey.schema_version >= 3 { 2 } else { 1 };
+    report.schema_version = match journey.schema_version {
+        4 => 3,
+        3 => 2,
+        _ => 1,
+    };
+    if journey.schema_version == 4 {
+        let authentication = journey
+            .authentication
+            .as_ref()
+            .expect("journey v4 authentication was validated");
+        let verification_step = authentication
+            .verification_step
+            .as_ref()
+            .expect("journey v4 verification_step was validated");
+        report.authentication = Some(AuthenticationReport {
+            provider: authentication.provider.clone(),
+            role: authentication.role.clone(),
+            verification_step: verification_step.clone(),
+            status: AuthenticationStatus::Blocked,
+            binding_sha256: hex_digest(authentication_binding(&journey).as_bytes()),
+        });
+    }
     // Build action provenance before the other fail-closed preconditions so a
     // v3 report remains structurally renderable even when target authorization
     // or authentication blocks execution first. Preserve those earlier safety
@@ -327,7 +372,7 @@ pub fn run(options: RunOptions) -> RunReport {
             return finalize(report, overall_start, &run_root);
         }
     }
-    if journey.authentication.is_some() {
+    if journey.schema_version < 4 && journey.authentication.is_some() {
         finish_blocked(
             &mut report,
             "authentication_unavailable",
@@ -341,6 +386,56 @@ pub fn run(options: RunOptions) -> RunReport {
         finish_blocked(&mut report, code, message);
         return finalize(report, overall_start, &run_root);
     }
+
+    let authentication_state = if journey.schema_version == 4 {
+        let authentication = journey
+            .authentication
+            .as_ref()
+            .expect("journey v4 authentication was validated");
+        if authentication.provider != AGENT_BROWSER_STATE_FILE_PROVIDER {
+            set_authentication_status(&mut report, AuthenticationStatus::Unsupported);
+            finish_blocked(
+                &mut report,
+                "authentication_provider_unsupported",
+                "the declared authentication provider is not supported".to_owned(),
+            );
+            return finalize(report, overall_start, &run_root);
+        }
+        let Some(path) = options.auth_state.as_deref() else {
+            set_authentication_status(&mut report, AuthenticationStatus::Missing);
+            finish_blocked(
+                &mut report,
+                "authentication_state_missing",
+                "this journey requires an external agent-browser authentication state file"
+                    .to_owned(),
+            );
+            return finalize(report, overall_start, &run_root);
+        };
+        match ValidatedState::load(path, &journey.origin) {
+            Ok(state) => Some(state),
+            Err(_) => {
+                set_authentication_status(&mut report, AuthenticationStatus::Invalid);
+                finish_blocked(
+                    &mut report,
+                    "authentication_state_invalid",
+                    "the supplied authentication state did not satisfy the bounded same-origin state-file contract"
+                        .to_owned(),
+                );
+                return finalize(report, overall_start, &run_root);
+            }
+        }
+    } else {
+        if options.auth_state.is_some() {
+            finish_blocked(
+                &mut report,
+                "authentication_unexpected",
+                "authentication state was supplied for a journey without an executable authentication contract"
+                    .to_owned(),
+            );
+            return finalize(report, overall_start, &run_root);
+        }
+        None
+    };
 
     let doctor = doctor::run(DoctorOptions {
         executable: options.agent_browser,
@@ -372,14 +467,15 @@ pub fn run(options: RunOptions) -> RunReport {
     report.driver.version = check.detected_version.as_ref().map(ToString::to_string);
     let session = session_name(&run_id);
     report.driver.session = Some(session.clone());
-    let policy_mode = if journey
+    let has_link_action = journey
         .steps
         .iter()
-        .any(|step| matches!(step.action, ValidatedAction::FollowLink { .. }))
-    {
-        DriverPolicyMode::FollowLink
-    } else {
-        DriverPolicyMode::ReadOnly
+        .any(|step| matches!(step.action, ValidatedAction::FollowLink { .. }));
+    let policy_mode = match (journey.schema_version == 4, has_link_action) {
+        (false, false) => DriverPolicyMode::ReadOnly,
+        (false, true) => DriverPolicyMode::FollowLink,
+        (true, false) => DriverPolicyMode::AuthenticatedReadOnly,
+        (true, true) => DriverPolicyMode::AuthenticatedFollowLink,
     };
     let mut driver = match AgentBrowserDriver::new_with_policy_mode(
         executable,
@@ -401,7 +497,13 @@ pub fn run(options: RunOptions) -> RunReport {
         }
     };
 
-    execute(&journey, &run_root, &mut driver, &mut report);
+    execute(
+        &journey,
+        &run_root,
+        &mut driver,
+        authentication_state,
+        &mut report,
+    );
     report.driver.commands = driver.records();
     finalize(report, overall_start, &run_root)
 }
@@ -504,6 +606,32 @@ fn action_authorization_binding(
     )
 }
 
+fn authentication_binding(journey: &ValidatedJourney) -> String {
+    let authentication = journey
+        .authentication
+        .as_ref()
+        .expect("authentication binding requires a declaration");
+    format!(
+        "crawlson-auth-requirement-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nprovider={}\nrole={}\nverification_step={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        authentication.provider,
+        authentication.role,
+        authentication
+            .verification_step
+            .as_deref()
+            .unwrap_or_default()
+    )
+}
+
+fn set_authentication_status(report: &mut RunReport, status: AuthenticationStatus) {
+    if let Some(authentication) = &mut report.authentication {
+        authentication.status = status;
+    }
+}
+
 fn valid_action_grant(value: &str) -> bool {
     let Some((journey_id, remainder)) = value.split_once('@') else {
         return false;
@@ -534,6 +662,7 @@ fn execute(
     journey: &ValidatedJourney,
     run_root: &Path,
     driver: &mut dyn BrowserDriver,
+    authentication_state: Option<ValidatedState>,
     report: &mut RunReport,
 ) {
     // Once the adapter exists, any command can start the session daemon before
@@ -555,6 +684,37 @@ fn execute(
     match driver.prepare() {
         Ok(()) => prepared = true,
         Err(error) => set_driver_error(&mut primary, &mut primary_reason, error),
+    }
+    if primary == RunOutcome::Passed
+        && let Some(authentication_state) = authentication_state
+    {
+        match authentication_state.stage() {
+            Ok(staged) => {
+                let load_result = driver.load_authentication(staged.path());
+                let cleanup_result = staged.close();
+                if load_result.is_err() || cleanup_result.is_err() {
+                    set_authentication_status(report, AuthenticationStatus::LoadFailed);
+                    primary = RunOutcome::Error;
+                    primary_reason = Reason {
+                        code: "authentication_state_load_failed".to_owned(),
+                        message:
+                            "agent-browser could not safely load the supplied authentication state"
+                                .to_owned(),
+                    };
+                }
+            }
+            Err(_) => {
+                set_authentication_status(report, AuthenticationStatus::LoadFailed);
+                primary = RunOutcome::Error;
+                primary_reason = Reason {
+                    code: "authentication_state_load_failed".to_owned(),
+                    message:
+                        "agent-browser could not safely load the supplied authentication state"
+                            .to_owned(),
+                };
+            }
+        }
+        drop(authentication_state);
     }
     if primary == RunOutcome::Passed {
         match driver.start_trace() {
@@ -585,10 +745,28 @@ fn execute(
                 has_navigated = true;
             }
             let mut stop = false;
+            let is_authentication_verification = report
+                .authentication
+                .as_ref()
+                .is_some_and(|authentication| authentication.verification_step == step.id);
             let status = match result {
-                Ok(StepResult::Passed) => RunOutcome::Passed,
+                Ok(StepResult::Passed) => {
+                    if is_authentication_verification {
+                        set_authentication_status(report, AuthenticationStatus::Verified);
+                    }
+                    RunOutcome::Passed
+                }
                 Ok(StepResult::Failed(message)) => {
-                    if primary == RunOutcome::Passed {
+                    if is_authentication_verification {
+                        primary = RunOutcome::Blocked;
+                        primary_reason = Reason {
+                            code: "authentication_verification_failed".to_owned(),
+                            message:
+                                "the visible authentication verification checkpoint did not pass"
+                                    .to_owned(),
+                        };
+                        stop = true;
+                    } else if primary == RunOutcome::Passed {
                         primary = RunOutcome::Failed;
                         primary_reason = Reason {
                             code: "checkpoint_failed".to_owned(),
@@ -598,7 +776,11 @@ fn execute(
                     if kind == "follow_link" {
                         stop = true;
                     }
-                    RunOutcome::Failed
+                    if is_authentication_verification {
+                        RunOutcome::Blocked
+                    } else {
+                        RunOutcome::Failed
+                    }
                 }
                 Ok(StepResult::Blocked(message)) => {
                     primary = RunOutcome::Blocked;
@@ -635,7 +817,12 @@ fn execute(
     report.outcome = primary;
     report.reason = primary_reason;
 
-    if opened && prepared && journey.evidence.diagnostics && primary != RunOutcome::Blocked {
+    if opened
+        && prepared
+        && trace_started
+        && journey.evidence.diagnostics
+        && primary != RunOutcome::Blocked
+    {
         match driver.diagnostics() {
             Ok(diagnostics) => report.diagnostics = Some(diagnostics),
             Err(error) => override_with_evidence_error(report, "diagnostics_failed", error),
@@ -1205,6 +1392,7 @@ fn base_report(root: &Path, run_id: &str, source_path: String, started_at: u64) 
         },
         target_origin: None,
         action_authorization: None,
+        authentication: None,
         started_at_unix_ms: started_at,
         finished_at_unix_ms: started_at,
         duration_ms: 0,
@@ -1554,6 +1742,7 @@ mod tests {
             &validated("Expected"),
             directory.path(),
             &mut driver,
+            None,
             &mut report,
         );
         assert_eq!(report.outcome, RunOutcome::Failed);
@@ -1571,6 +1760,7 @@ mod tests {
             &validated("Expected"),
             directory.path(),
             &mut driver,
+            None,
             &mut report,
         );
         assert_eq!(report.execution_outcome, RunOutcome::Passed);
@@ -1633,6 +1823,7 @@ mod tests {
             &validated("Expected"),
             directory.path(),
             &mut driver,
+            None,
             &mut report,
         );
         assert_eq!(report.execution_outcome, RunOutcome::Blocked);

@@ -68,7 +68,8 @@ The MVP core and CLI are written in Rust. `agent-browser` is the initial
 execution path, integrated through its supported process and JSON interface so
 the boundary remains replaceable. The first versioned journey and report
 contracts are deliberately narrow: v1 and v2 are read-only, while v3 adds one
-explicitly authorized, deterministic same-origin link action. See
+explicitly authorized, deterministic same-origin link action and v4 adds one
+secret-safe `agent-browser` state-file authentication provider. See
 [`ADR 0001`](docs/architecture/decisions/0001-rust-runtime-and-agent-browser-boundary.md)
 for the runtime comparison, adapter lifecycle, safety ownership, and exact
 fallback criteria.
@@ -78,19 +79,21 @@ application-independent journey, evidence, finding, and guide boundary.
 
 ## Status
 
-The Rust 0.7.0 CLI provides an independently useful action-and-guide vertical
-slice. It can run an explicitly authorized journey through
-`agent-browser`, retain raw evidence, follow and verify a declared same-origin
-link, render focused action images, and turn a completed run into either a
-verified guide or evidence-backed deterministic findings. Multiple verified
-runs can be compiled into a deterministic, navigable Markdown guide collection
-with a separate findings review tree and read-only integrity audit. The
-repository includes a credential-free demo of that complete loop and a
+The Rust 0.8.0 CLI provides an independently useful authenticated
+action-and-guide vertical slice. It can run an explicitly authorized journey
+through `agent-browser`, import bounded exact-origin browser storage without
+retaining its source or values, verify the declared role through visible UI,
+retain raw evidence, follow and verify a declared same-origin link, render
+focused action images, and turn a completed run into either a verified guide or
+evidence-backed deterministic findings. Multiple verified runs can be compiled
+into a deterministic, navigable Markdown guide collection with a separate
+findings review tree and read-only integrity audit. The repository includes a
+self-contained disposable-session demo of that complete loop and a
 non-publishing release path for validating bundles and managed installation. No
-public 0.7.0 release exists yet: license selection, namespace reservation,
-and production signing-key custody remain owner decisions. Autonomous agent
-exploration, authentication execution, mutations, and model-judged observations
-remain later vertical slices.
+public 0.8.0 release exists yet: license selection, namespace reservation, and
+production signing-key custody remain owner decisions. Autonomous agent
+exploration, mutations, and model-judged observations remain later vertical
+slices.
 
 Build and exercise the current CLI from a Rust 1.92 environment:
 
@@ -105,6 +108,9 @@ cargo build --locked --bins
 ./target/debug/crawlson --json run examples/follow-link-pass.toml \
   --allow-origin http://127.0.0.1:4173 \
   --allow-action demo.follow-link-pass@1:follow-continue
+./target/debug/crawlson --json run examples/authenticated-pass.toml \
+  --allow-origin http://127.0.0.1:4173 \
+  --auth-state /absolute/private/state.json
 ./target/debug/crawlson render crawlson-runs/RUN_ID \
   --journey examples/follow-link-pass.toml
 ./target/debug/crawlson --json guides build ./crawlson-guides.toml \
@@ -119,7 +125,7 @@ so `clson doctor`, `clson guides`, and `clson upgrade` have the same behavior.
 
 ### Release bundles and managed installation
 
-Crawlson 0.7.0 defines deterministic bundles for four targets: Apple Silicon
+Crawlson 0.8.0 defines deterministic bundles for four targets: Apple Silicon
 macOS, Intel macOS, x86-64 Windows, and x86-64 GNU/Linux. Each bundle contains
 the `crawlson`, `clson`, and `crawlson-demo` binaries plus the complete demo
 script and journey fixtures. The demo stays in the extracted bundle; managed
@@ -189,7 +195,7 @@ scripts/demo.sh \
   --output-dir ./crawlson-demo-output
 ```
 
-Both forms start the loopback application and run six cases through the real
+Both forms start the loopback application and run eight cases through the real
 browser adapter, then compile and check the resulting guide collections:
 
 - a passing journey that renders a Markdown guide;
@@ -197,15 +203,18 @@ browser adapter, then compile and check the resulting guide collections:
   plus a missing-target-authorization attempt blocked before browser launch;
 - a same-origin link action that is executed once, verified, and rendered as a
   guide;
-- an action whose exact postcondition fails and is rendered as a finding; and
-- a missing-action-authorization attempt that is blocked before browser launch.
+- an action whose exact postcondition fails and is rendered as a finding;
+- a missing-action-authorization attempt that is blocked before browser launch;
+- an authenticated viewer journey whose disposable state is verified through
+  visible UI and rendered as a guide; and
+- a missing-state attempt that is blocked before browser launch.
 
-The two successful journeys become one root/topic/guide Markdown tree with
+The three successful journeys become one root/topic/guide Markdown tree with
 byte-identical red-box/dimmed focused images. The two deterministic failures
 become a separate linked review tree; that tree deliberately has no public root
 guide index. Both trees are checked again without rewriting them.
 
-The command exits successfully only when all six produce their expected
+The command exits successfully only when all eight produce their expected
 outcomes. It prints the guide, findings, collection, and review paths and
 preserves the JSON reports, raw viewport screenshots, red-box/dimmed focused
 screenshots, focus metadata, browser traces, command logs, collection manifests,
@@ -233,14 +242,21 @@ Journey v1 and v2 are strict TOML. Both support same-origin navigation, URL and
 visible text checkpoints, and target capture without activating the target. V2
 adds explicit capture-to-checkpoint evidence associations and render-safe
 bounds. Journey v3 preserves those contracts and adds only `follow_link`: a
-visible, enabled link with a declared exact same-origin destination. Start with
+visible, enabled link with a declared exact same-origin destination. Journey v4
+adds an external `agent-browser` state file plus a required visible role
+checkpoint. Start with
 [`examples/read-only-journey.toml`](examples/read-only-journey.toml), its
 [`journey v2 JSON Schema`](schemas/journey-v2.schema.json), the preserved
 [`journey v1 JSON Schema`](schemas/journey-v1.schema.json), the
 [`follow-link example`](examples/follow-link-pass.toml), the
 [`journey v3 JSON Schema`](schemas/journey-v3.schema.json), the v1
 [`run-report JSON Schema`](schemas/run-report-v1.schema.json), the v2
-[`action run-report JSON Schema`](schemas/run-report-v2.schema.json), and the
+[`action run-report JSON Schema`](schemas/run-report-v2.schema.json), the
+[`authenticated example`](examples/authenticated-pass.toml), the
+[`journey v4 JSON Schema`](schemas/journey-v4.schema.json), the v3
+[`authenticated run-report JSON Schema`](schemas/run-report-v3.schema.json), the
+[`authentication state-file contract`](docs/architecture/authentication-v1.md),
+and the
 [`authorized-link contract`](docs/architecture/journey-v3.md).
 
 Every valid v1 journey contains at least one deterministic checkpoint and one
@@ -253,8 +269,18 @@ The journey's `[target].origin` is not enough by itself: every invocation must
 repeat the exact authorized HTTP(S) origin with `--allow-origin`. Crawlson
 normalizes scheme, hostname, and effective port, rejects unsafe documents
 before browser launch, and stops when an observed redirect leaves that origin.
-An authentication requirement is explicit `blocked` until a replaceable
-authentication adapter exists; it is never skipped or treated as passing.
+Journey v4 requires the `agent-browser-state-file` provider and an external
+`--auth-state` path. Target and action grants are checked before that path is
+accessed. Crawlson accepts only a bounded regular state document whose browser
+storage matches the exact target origin, loads a neutral private temporary
+copy before tracing, suppresses the path-echoing driver output, and deletes the
+copy immediately. The report binds only the public provider, role, and declared
+visible verification step. Loading state is not proof of authentication: the
+run remains blocked unless that role-specific UI checkpoint passes. Missing,
+unsupported, invalid, load-failed, blocked, and verified outcomes remain
+distinct; older authentication declarations remain explicitly blocked. Cookie
+entries are rejected because `agent-browser 0.26` cannot prevent a
+port-agnostic cookie from reaching another port on the same hostname.
 
 A v3 link declaration is not permission to execute it. Every `follow_link`
 step requires an exact runtime grant in the form
@@ -265,7 +291,7 @@ pre-action raw and focused evidence. It dispatches one click without retry and
 passes only after the observed URL exactly matches the declaration. An
 off-origin destination is blocked; an uncertain post-dispatch result is an
 error with an unknown action effect. Generic clicks, buttons, typing, form
-submission, scripts, uploads, authentication, and mutations remain
+submission, scripts, uploads, automated login flows, and mutations remain
 unavailable as journey capabilities. Internally, the driver click is constrained
 to the declared CSS selector intersected with an anchor and its exact observed
 href. Following a link can still invoke application behavior, so an action grant
@@ -315,9 +341,9 @@ agent-browser envelope succeeded before capability-specific validation.
 `crawlson render RUN_DIRECTORY --journey JOURNEY` is an offline consumer of a
 completed run; `clson render` is identical. It launches no browser and accepts
 no arbitrary output location. The CLI-supplied run directory is the only file
-authority. Before writing, Crawlson strictly validates report v1 or v2, matches
-the exact journey digest/identity/revision/origin, checks the complete executed step
-sequence, and rehashes every registered artifact. Symlinks, path escapes,
+authority. Before writing, Crawlson strictly validates report v1, v2, or v3,
+matches the exact journey digest/identity/revision/origin, checks the complete
+executed step sequence, and rehashes every registered artifact. Symlinks, path escapes,
 missing evidence, source drift, focus-sidecar mismatches, incomplete cleanup,
 and contradictory outcomes fail closed.
 
@@ -349,8 +375,9 @@ inputs exit 4. See the published
 
 Artifact hashing establishes consistency with the local run report, not
 cryptographic authenticity: a party able to replace the whole unsigned bundle
-could replace its hashes too. Focused screenshots can contain sensitive pixels;
-Crawlson does not describe them as redacted or automatically publish-safe.
+could replace its hashes too. Focused screenshots and authenticated traces can
+contain sensitive UI; Crawlson does not describe them as redacted or
+automatically publish-safe.
 
 ### Guide collections
 

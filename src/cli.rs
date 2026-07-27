@@ -99,6 +99,10 @@ struct RunArgs {
     #[arg(long, value_name = "JOURNEY@REVISION:STEP")]
     allow_action: Vec<String>,
 
+    /// External agent-browser state for a journey v4 authentication contract.
+    #[arg(long, value_name = "PATH")]
+    auth_state: Option<PathBuf>,
+
     /// Parent directory beneath which a unique run directory is created.
     #[arg(long, value_name = "DIRECTORY", default_value = "crawlson-runs")]
     output_dir: PathBuf,
@@ -218,6 +222,7 @@ where
                 journey_path: args.journey,
                 allowed_origin: args.allow_origin,
                 allowed_actions: args.allow_action,
+                auth_state: args.auth_state,
                 output_directory: args.output_dir,
                 agent_browser: args.agent_browser,
                 action_timeout: std::time::Duration::from_secs(args.action_timeout_seconds),

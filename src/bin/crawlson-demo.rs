@@ -151,6 +151,40 @@ const COMPLETE_PAGE: &str = r#"<!doctype html>
 </html>
 "#;
 
+const AUTHENTICATED_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crawlson authenticated demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body { margin: 0; min-height: 100vh; background: #f4f7fb; color: #172033; font-family: ui-sans-serif, system-ui, sans-serif; }
+    main { width: min(760px, calc(100% - 48px)); margin: 72px auto; padding: 56px; border: 1px solid #dce3ee; border-radius: 18px; background: #fff; box-shadow: 0 18px 50px rgb(32 49 78 / 12%); }
+    .eyebrow { margin: 0 0 12px; color: #365b96; font-size: 14px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(34px, 5vw, 52px); line-height: 1.08; letter-spacing: -.035em; }
+    #authenticated-role { display: inline-flex; margin-top: 28px; padding: 14px 20px; border-radius: 10px; background: #e6f5ec; color: #155b35; font-size: 19px; font-weight: 750; }
+  </style>
+</head>
+<body>
+  <main aria-labelledby="authenticated-heading">
+    <p class="eyebrow">Disposable local session</p>
+    <h1 id="authenticated-heading">Authenticated demo</h1>
+    <p id="authenticated-role">Sign in required</p>
+  </main>
+  <script nonce="crawlson-demo">
+    (() => {
+      const state = window.localStorage.getItem("crawlson_demo_session");
+      if (state && state.startsWith("crawlson-demo-fixture-")) {
+        document.getElementById("authenticated-role").textContent = "Viewer access";
+      }
+    })();
+  </script>
+</body>
+</html>
+"#;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "crawlson-demo",
@@ -368,6 +402,15 @@ fn route(request: &[u8]) -> Response {
             allow: None,
             location: None,
         },
+        "/authenticated" => Response {
+            status: 200,
+            reason: "OK",
+            media_type: "text/html; charset=utf-8",
+            body: AUTHENTICATED_PAGE.as_bytes(),
+            include_body: method == "GET",
+            allow: None,
+            location: None,
+        },
         "/healthz" => Response {
             status: 200,
             reason: "OK",
@@ -390,7 +433,7 @@ fn write_response(stream: &mut TcpStream, response: Response) -> Result<(), Stri
         .location
         .map_or_else(String::new, |value| format!("Location: {value}\r\n"));
     let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}Cache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}Cache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-crawlson-demo'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         response.status,
         response.reason,
         response.media_type,
@@ -455,6 +498,16 @@ mod tests {
         assert_eq!(redirect.status, 302);
         assert_eq!(redirect.location, Some("/unexpected"));
         assert_eq!(route(b"GET /unexpected HTTP/1.1\r\n\r\n").status, 200);
+
+        let authenticated = route(b"GET /authenticated HTTP/1.1\r\nHost: example\r\n\r\n");
+        assert_eq!(authenticated.status, 200);
+        let authenticated_body = std::str::from_utf8(authenticated.body).unwrap();
+        assert!(authenticated_body.contains("id=\"authenticated-role\">Sign in required</p>"));
+        assert!(authenticated_body.contains("window.localStorage.getItem"));
+        assert!(authenticated_body.contains("textContent = \"Viewer access\""));
+        let authenticated_head = route(b"HEAD /authenticated HTTP/1.1\r\n\r\n");
+        assert_eq!(authenticated_head.status, 200);
+        assert!(!authenticated_head.include_body);
 
         let head = route(b"HEAD /healthz HTTP/1.1\r\n\r\n");
         assert_eq!(head.status, 200);

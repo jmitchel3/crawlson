@@ -1,0 +1,38 @@
+schema_version = 4
+
+[journey]
+id = "demo.authenticated-pass"
+revision = 1
+title = "Verify the authenticated Crawlson demo"
+purpose = "Verify a disposable viewer session through an explicit visible UI checkpoint."
+expected_outcome = "The viewer access marker is visible."
+mode = "read_only"
+
+[target]
+origin = "http://127.0.0.1:4173"
+
+[authentication]
+provider = "agent-browser-state-file"
+role = "viewer"
+verification_step = "verify-viewer-session"
+
+[evidence]
+trace = true
+diagnostics = true
+
+[[steps]]
+id = "open-authenticated-demo"
+title = "Open the authenticated demo"
+action = { type = "navigate", path = "/authenticated" }
+
+[[steps]]
+id = "verify-viewer-session"
+title = "Verify viewer access"
+action = { type = "check_text", selector = "#authenticated-role", expected = "Viewer access", comparison = "exact" }
+
+[[steps]]
+id = "capture-viewer-access"
+title = "Capture viewer access"
+guide_instruction = "Review the highlighted viewer access marker."
+evidence_for = ["verify-viewer-session"]
+action = { type = "capture", selector = "#authenticated-role", alt_text = "Viewer access marker highlighted in red" }

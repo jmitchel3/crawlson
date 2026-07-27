@@ -340,10 +340,10 @@ fn read_regular_bounded(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8
 }
 
 fn validate_report_header(report: &InputRunReport) -> Result<(), RenderError> {
-    if !matches!(report.schema_version, 1 | 2) {
+    if !matches!(report.schema_version, 1..=3) {
         return Err(RenderError::new(
             "report_version_unsupported",
-            "only run report schema versions 1 and 2 can be rendered",
+            "only run report schema versions 1, 2, and 3 can be rendered",
         ));
     }
     if report.run_directory.len() > 32_768 || report.run_directory.chars().any(char::is_control) {
@@ -459,6 +459,7 @@ fn validate_driver(driver: &InputDriver) -> Result<(), RenderError> {
     let mut expected = 1;
     const ALLOWED: &[&str] = &[
         "set_viewport",
+        "authentication_load",
         "trace_start",
         "navigate",
         "current_url",
@@ -475,6 +476,13 @@ fn validate_driver(driver: &InputDriver) -> Result<(), RenderError> {
         "close",
     ];
     for command in &driver.commands {
+        let authentication_output_redacted = command.capability != "authentication_load"
+            || (command.stdout_bytes == 0
+                && command.stdout_captured_bytes == 0
+                && command.stdout_captured_sha256 == journey::hex_digest(&[])
+                && command.stderr_bytes == 0
+                && command.stderr_captured_bytes == 0
+                && command.stderr_captured_sha256 == journey::hex_digest(&[]));
         if command.sequence != expected
             || command.capability.trim().is_empty()
             || !ALLOWED.contains(&command.capability.as_str())
@@ -484,6 +492,7 @@ fn validate_driver(driver: &InputDriver) -> Result<(), RenderError> {
             || !is_sha256(&command.stderr_captured_sha256)
             || command.duration_ms > 3_600_000
             || (command.upstream_success && command.exit_code != Some(0))
+            || !authentication_output_redacted
         {
             return Err(RenderError::new(
                 "report_invalid",
@@ -507,9 +516,11 @@ fn validate_completed_driver(
         .filter(|version| version.major == 0 && version.minor == 26 && version.pre.is_empty());
     let session = report.driver.session.as_deref();
     let commands = &report.driver.commands;
-    let lifecycle_valid = commands.len() >= 6
+    let authentication_offset = usize::from(journey.schema_version == 4);
+    let lifecycle_valid = commands.len() >= 6 + authentication_offset
         && commands[0].capability == "set_viewport"
-        && commands[1].capability == "trace_start"
+        && (authentication_offset == 0 || commands[1].capability == "authentication_load")
+        && commands[1 + authentication_offset].capability == "trace_start"
         && commands[commands.len() - 4].capability == "console"
         && commands[commands.len() - 3].capability == "page_errors"
         && commands[commands.len() - 2].capability == "trace_stop"
@@ -571,6 +582,7 @@ fn validate_completed_driver(
         .filter(|step| step.observation.action_command_sequence.is_some())
         .count();
     if count("set_viewport") != 1
+        || count("authentication_load") != authentication_offset
         || count("trace_start") != 1
         || count("navigate") != navigate_count
         || count("is_visible") != visible_count
@@ -630,7 +642,11 @@ fn validate_provenance(
     report: &InputRunReport,
     journey: &ValidatedJourney,
 ) -> Result<(), RenderError> {
-    let expected_report_version = if journey.schema_version >= 3 { 2 } else { 1 };
+    let expected_report_version = match journey.schema_version {
+        4 => 3,
+        3 => 2,
+        _ => 1,
+    };
     if report.schema_version != expected_report_version
         || report.journey.source_path.is_empty()
         || report.journey.source_path.contains(['/', '\\'])
@@ -645,6 +661,98 @@ fn validate_provenance(
         ));
     }
     validate_action_authorization(report, journey)?;
+    validate_authentication(report, journey)?;
+    Ok(())
+}
+
+fn validate_authentication(
+    report: &InputRunReport,
+    journey: &ValidatedJourney,
+) -> Result<(), RenderError> {
+    if journey.schema_version != 4 {
+        if report.authentication.is_some() {
+            return Err(RenderError::new(
+                "report_invalid",
+                "legacy run report unexpectedly contains authentication provenance",
+            ));
+        }
+        return Ok(());
+    }
+    let declared = journey
+        .authentication
+        .as_ref()
+        .expect("journey v4 authentication was validated");
+    let verification_step = declared
+        .verification_step
+        .as_deref()
+        .expect("journey v4 verification_step was validated");
+    let authentication = report.authentication.as_ref().ok_or_else(|| {
+        RenderError::new(
+            "report_invalid",
+            "authenticated report omitted authentication provenance",
+        )
+    })?;
+    let binding = format!(
+        "crawlson-auth-requirement-v1\njourney={}\nrevision={}\nsource_sha256={}\norigin={}\nprovider={}\nrole={}\nverification_step={}\n",
+        journey.meta.id,
+        journey.meta.revision,
+        journey.source_sha256,
+        journey.origin,
+        declared.provider,
+        declared.role,
+        verification_step
+    );
+    let reason_status = |code: &str| match code {
+        "authentication_state_missing" => Some(InputAuthenticationStatus::Missing),
+        "authentication_provider_unsupported" => Some(InputAuthenticationStatus::Unsupported),
+        "authentication_state_invalid" => Some(InputAuthenticationStatus::Invalid),
+        "authentication_state_load_failed" => Some(InputAuthenticationStatus::LoadFailed),
+        "authentication_verification_failed" => Some(InputAuthenticationStatus::Blocked),
+        _ => None,
+    };
+    let verification_passed = report
+        .steps
+        .iter()
+        .any(|step| step.id == verification_step && step.status == Outcome::Passed);
+    let expected_status = if verification_passed {
+        InputAuthenticationStatus::Verified
+    } else {
+        reason_status(&report.execution_reason.code).unwrap_or(InputAuthenticationStatus::Blocked)
+    };
+    let load_commands = report
+        .driver
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command.capability == "authentication_load")
+        .collect::<Vec<_>>();
+    let successful_load = load_commands.first().is_some_and(|(index, command)| {
+        *index == 1 && command.upstream_success && command.exit_code == Some(0)
+    });
+    let load_lifecycle_valid = load_commands.len() <= 1
+        && load_commands.first().is_none_or(|(index, _)| *index == 1)
+        && (report.steps.is_empty() && !verification_passed || successful_load)
+        && (!matches!(
+            authentication.status,
+            InputAuthenticationStatus::Missing
+                | InputAuthenticationStatus::Unsupported
+                | InputAuthenticationStatus::Invalid
+        ) || report.driver.commands.is_empty())
+        && (authentication.status != InputAuthenticationStatus::LoadFailed
+            || report.steps.is_empty());
+    if authentication.provider != declared.provider
+        || authentication.role != declared.role
+        || authentication.verification_step != verification_step
+        || authentication.binding_sha256 != journey::hex_digest(binding.as_bytes())
+        || authentication.status != expected_status
+        || reason_status(&report.reason.code).is_some_and(|status| status != authentication.status)
+        || !load_lifecycle_valid
+    {
+        return Err(RenderError::new(
+            "report_invalid",
+            "authentication provenance does not match the journey and run outcome",
+        ));
+    }
     Ok(())
 }
 
@@ -2600,6 +2708,7 @@ struct InputRunReport {
     journey: InputJourney,
     target_origin: Option<String>,
     action_authorization: Option<InputActionAuthorization>,
+    authentication: Option<InputAuthentication>,
     started_at_unix_ms: u64,
     finished_at_unix_ms: u64,
     duration_ms: u64,
@@ -2612,6 +2721,27 @@ struct InputRunReport {
     artifacts: Vec<InputArtifact>,
     diagnostics: Option<InputDiagnostics>,
     cleanup: InputCleanup,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputAuthentication {
+    provider: String,
+    role: String,
+    verification_step: String,
+    status: InputAuthenticationStatus,
+    binding_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InputAuthenticationStatus {
+    Missing,
+    Unsupported,
+    Invalid,
+    LoadFailed,
+    Blocked,
+    Verified,
 }
 
 #[derive(Debug, Deserialize)]

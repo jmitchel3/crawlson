@@ -1,3 +1,4 @@
+pub mod auth;
 mod cli;
 pub mod collection;
 pub mod doctor;
