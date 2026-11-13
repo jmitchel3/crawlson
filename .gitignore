@@ -1,2 +1,4 @@
 /.cache/kanbanlan/
 /target/
+# Local Kanbanlan coordination state
+/.worktrees/
