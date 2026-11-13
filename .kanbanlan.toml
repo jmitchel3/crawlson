@@ -19,3 +19,7 @@ number = 2
 
 [local]
 stale_seconds = 180
+rate_limit_floor = 500
+
+[session_tracking]
+enabled = false
